@@ -107,30 +107,6 @@ class MacroThread(QThread):
         try: return self.driver.page_source
         except: return ""
 
-    # ── 예매(poticket) 새 창으로 전환 ─────────
-    # [예매하기]를 누르면 poticket.interpark.com 예매창이 새 창으로 열린다.
-    # 모든 창을 매번 순회/복귀하면 창 focus가 계속 바뀌어 두 창이 번갈아
-    # 새로고침되므로, 가장 최근에 열린 창(예매 팝업) 하나만 확인한다.
-    def _switch_to_booking_window(self, keywords):
-        drv = self.driver
-        # 현재 창이 이미 예매 페이지면 전환 불필요 (focus 건드리지 않음)
-        try:
-            if any(k in drv.current_url for k in keywords):
-                return True
-        except Exception:
-            pass
-        # 창이 여러 개일 때만, 가장 최근 창으로 한 번 전환해 확인
-        try:
-            handles = drv.window_handles
-            if len(handles) > 1:
-                drv.switch_to.window(handles[-1])
-                if any(k in drv.current_url for k in keywords):
-                    self.log("→ 예매창(새 창)으로 전환")
-                    return True
-        except Exception:
-            pass
-        return False
-
     # ── 로그인 완료 감지 ──────────────────────
     # 로그인 페이지(accounts.*)를 벗어나 서비스 도메인(nol/poticket interpark,
     # nol.yanolja, myaccount)에 도달하면 로그인 완료로 간주한다.
@@ -984,13 +960,33 @@ class MacroThread(QThread):
                 except:
                     self._wait(1)
 
-            # ② 예매 페이지 대기 (예매창은 새 창으로 열리므로 핸들 전환 필요)
+            # ② 예매 페이지 대기 (예매창은 "새 창"으로 열린다)
+            # 매초 창을 번갈아 전환하면 두 창이 계속 새로고침되므로,
+            # 창 개수가 늘어났을 때(=새 예매창 등장)만 그 창으로 "한 번" 전환한다.
             self.log("원하시는 링크에 들어가서 [예매하기] 버튼을 눌러 주세요.")
             booking_kw = ("poticket", "Book", "motickets")
+            try:
+                known = len(self.driver.window_handles)
+            except Exception:
+                known = 1
             for _ in range(1800):
                 self._wait(1)
-                if self._switch_to_booking_window(booking_kw):
-                    break
+                # 현재 창이 이미 예매 페이지면 완료
+                try:
+                    if any(k in self.driver.current_url for k in booking_kw):
+                        break
+                except Exception:
+                    pass
+                # 새 창이 열렸을 때만(개수 증가) 가장 최근 창으로 한 번 전환
+                try:
+                    handles = self.driver.window_handles
+                    if len(handles) > known:
+                        known = len(handles)
+                        self.driver.switch_to.window(handles[-1])
+                        self.log("→ 새 예매창으로 전환")
+                        self._wait(1.5)
+                except Exception:
+                    pass
             self._wait(2)
 
             # ③ 안심예매 캡챠 처리
