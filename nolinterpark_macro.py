@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import io
 import re
 import sys
 import time
@@ -649,7 +650,7 @@ class MacroThread(QThread):
         var seats = document.querySelectorAll(
             'rect[fill], circle[fill], path[fill], rect[class], circle[class],' +
             'td, td[bgcolor], td[style], div[style*="background"],' +
-            'rect, circle');
+            'span[class], img, rect, circle');
         var cands = [];
         for(var i=0;i<seats.length;i++){
             var el=seats[i];
@@ -668,6 +669,39 @@ class MacroThread(QThread):
         }
         return cands.length;
         """
+        # 등급명(title/alt) 기반 탐지용 JS - 색이 안 잡히는 이미지 좌석 대응
+        gname = (grade or {}).get("name", "")
+        attr_js = r"""
+        var gname = (arguments[0]||'').replace(/\s+/g,'');
+        function clsOf(el){var c=el.className;if(c&&c.baseVal!==undefined)c=c.baseVal;return(''+(c||'')).toLowerCase();}
+        function isSold(el){
+            var c=clsOf(el);
+            var t=((el.getAttribute('title')||'')+(el.getAttribute('alt')||'')).toLowerCase();
+            var src=((el.getAttribute('src')||'')).toLowerCase();
+            return c.indexOf('sold')>=0||c.indexOf('disable')>=0||c.indexOf('reserved')>=0
+                 ||c.indexOf('unavailab')>=0||t.indexOf('판매완료')>=0
+                 ||src.indexOf('sold')>=0||src.indexOf('disable')>=0||src.indexOf('_n')>=0;
+        }
+        var nodes=document.querySelectorAll('[title],[alt]');
+        var cands=[];
+        for(var i=0;i<nodes.length;i++){
+            var el=nodes[i];
+            var t=((el.getAttribute('title')||'')+(el.getAttribute('alt')||'')).replace(/\s+/g,'');
+            if(gname && t.indexOf(gname)<0) continue;     // 등급명 포함 좌석만
+            var v=(el.getAttribute('value')||'');
+            if(v && v!=='N') continue;                    // value 있으면 N(여석)만
+            if(isSold(el)) continue;
+            var b=el.getBoundingClientRect?el.getBoundingClientRect():null;
+            if(!b||b.width<2||b.height<2) continue;
+            cands.push(el);
+        }
+        if(cands.length===0) return 0;
+        var p=cands[0];
+        try{p.click();}catch(e){p.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));}
+        return cands.length;
+        """
+
+        # 1) 색 기반 탐지
         try:
             drv.switch_to.default_content()
         except Exception:
@@ -677,9 +711,17 @@ class MacroThread(QThread):
         except Exception as e:
             self.log(f"좌석 클릭 오류: {str(e)[:80]}")
             n = 0
+        # 2) 색으로 못 찾으면 등급명 속성 기반 탐지
+        if not n:
+            try: drv.switch_to.default_content()
+            except Exception: pass
+            try:
+                n = self._click_seat_recursive(attr_js, gname, 0)
+            except Exception:
+                n = 0
         if n and n > 0:
-            gname = (grade or {}).get("name", "모두")
-            self.log(f"[{gname}] 같은 색 좌석 발견 → 좌석 클릭 (후보 {n}개)")
+            disp = gname or "모두"
+            self.log(f"[{disp}] 빈 좌석 발견 → 좌석 클릭 (후보 {n}개)")
             self._wait(1.0)
             self._close_seat_panel()   # '잔여좌석 안내' 패널이 있으면 닫기
             return True
@@ -887,7 +929,8 @@ class MacroThread(QThread):
     def _rotate_zones(self, zones, grade=None):
         cycle = 0
         consecutive_err = 0
-        self.log(f"구역 순회를 시작합니다 (딜레이 {self.delay}초)")
+        self._diag_done = False
+        self.log(f"빈 좌석 탐색을 시작합니다 (딜레이 {self.delay}초)")
         while True:
             for zone in zones:
                 self._wait(0)
@@ -908,6 +951,10 @@ class MacroThread(QThread):
                     # 예매 가능 좌석 클릭 → 성공하면 순회 종료
                     if self._click_seat(grade):
                         return
+                    # 첫 구역 진입 후에도 못 잡으면 좌석 DOM 구조를 1회 진단 출력
+                    if not self._diag_done:
+                        self._diag_done = True
+                        self._diagnose_seats()
                     consecutive_err = 0
 
                 except InterruptedError:
@@ -920,7 +967,44 @@ class MacroThread(QThread):
                     self._wait(0.5)
             cycle += 1
             if cycle % 5 == 0:
-                self.log(f"구역 순회 {cycle}바퀴 완료...")
+                self.log(f"빈 좌석 탐색 중... ({cycle}바퀴째, 아직 못 찾음)")
+
+    # ── 좌석 DOM 진단 (구조 파악용, 1회) ───────
+    # 좌석을 못 잡을 때 실제 좌석 요소 샘플을 로그로 출력한다.
+    def _diagnose_seats(self):
+        js = r"""
+        var out=[];
+        var nodes=document.querySelectorAll('img,td,span,div,rect,circle,a');
+        for(var i=0;i<nodes.length && out.length<10;i++){
+            var el=nodes[i];
+            var b=el.getBoundingClientRect?el.getBoundingClientRect():{width:0,height:0};
+            if(b.width<2||b.height<2||b.width>50||b.height>50) continue;
+            var cs=getComputedStyle(el);
+            var cls=el.className; if(cls&&cls.baseVal!==undefined) cls=cls.baseVal;
+            out.push((el.tagName||'')
+                +' cls='+(((cls||'')+'').slice(0,18))
+                +' title='+(((el.getAttribute('title')||''))+'').slice(0,16)
+                +' val='+((el.getAttribute('value')||''))
+                +' bg='+((cs.backgroundColor||'').replace(/\s/g,''))
+                +' src='+(((el.getAttribute('src')||'')).split('/').pop()||'').slice(0,18));
+        }
+        return out;
+        """
+        def run():
+            try: return self.driver.execute_script(js) or []
+            except Exception: return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        rows = self._collect_all_frames(run)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        if rows:
+            self.log("[진단] 좌석 후보 요소 샘플(구조 확인용):")
+            for r in rows[:8]:
+                self.log("  " + str(r)[:95])
+        else:
+            self.log("[진단] 좌석 후보 요소를 찾지 못했습니다")
 
     # ── 좌석선택완료 / 티켓가격선택 버튼 클릭 ───
     # 버튼은 보통 메인 예매 페이지(우측 패널)에 있으므로 default content 부터
