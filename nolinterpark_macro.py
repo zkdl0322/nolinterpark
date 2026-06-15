@@ -27,9 +27,12 @@ from PySide6.QtWidgets import (
 
 EXPIRE_DATE = "~26.09.30"
 LOGIN_URL   = (
-    "https://accounts.yanolja.com/"
+    "https://accounts.yanolja.com/v3/login"
     "?clientId=inpark-pc&postProc=FULLSCREEN"
-    "&origin=https%3A%2F%2Fnol.interpark.com"
+    "&origin=https%3A%2F%2Fnol.interpark.com%2F"
+    "&loginTab=NON_MEMBER_MY_BOOKING&service=interpark-integrate"
+    "&nol_device_id=178123879502153851"
+    "&redirect=aHR0cHM6Ly9hY2NvdW50cy5pbnRlcnBhcmsuY29tL2xvZ2luL3N1Y2Nlc3Mvbm9sP3Bvc3RQcm9jPUZVTExTQ1JFRU4mb3JpZ2luPWh0dHBzJTNBJTJGJTJGbm9sLmludGVycGFyay5jb20lMkY"
 )
 GRADES = ["스탠딩R", "스탠딩S", "지정석R", "지정석S", "지정석A", "지정석B"]  # fallback only
 
@@ -965,17 +968,17 @@ class MacroThread(QThread):
             else:
                 self.log("로그인 대기 시간 초과"); return
             self.log("→ 로그인 완료")
+            # 로그인 후 자동 리다이렉트가 끝나길 잠깐 대기 (조기 이동 방지)
+            self._wait(2.0)
 
             # 로그인 직후엔 accounts.yanolja.com / nol.yanolja.com 등으로 가있으므로
-            # 놀 인터파크 메인(nol.interpark.com)으로 이동시킨다.
-            # 이미 nol.interpark.com 이면 재이동하지 않는다(중복 이동/로그 방지).
-            for _try in range(6):
-                if "nol.interpark.com" in self._url():
-                    break
+            # 놀 인터파크 메인(nol.interpark.com)으로 "한 번만" 이동시킨다.
+            # (루프로 연속 이동하면 새로고침이 반복되므로 단발 이동으로 처리)
+            if "nol.interpark.com" not in self._url():
                 try:
                     self.log("→ 놀 인터파크 메인(nol.interpark.com)으로 이동")
                     self.driver.get("https://nol.interpark.com/")
-                    self._wait(2.5)
+                    self._wait(2.0)
                 except:
                     self._wait(1)
 
