@@ -273,6 +273,37 @@ class MacroThread(QThread):
             return True
         return False
 
+    # ── 모든 프레임 재귀 실행 헬퍼 ────────────
+    # 현재 컨텍스트부터 하위 iframe까지 재귀로 fn()을 실행해 결과 리스트를 누적.
+    # (poticket BookMain.asp 처럼 좌석/등급이 중첩 iframe 안에 있을 때 사용)
+    def _collect_all_frames(self, fn, depth=0):
+        drv = self.driver
+        try:
+            out = list(fn() or [])
+        except Exception:
+            out = []
+        if depth >= 4:
+            return out
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
+            try:
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                out += self._collect_all_frames(fn, depth + 1)
+                drv.switch_to.parent_frame()
+            except Exception:
+                try:
+                    drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return out
+
     # ── 등급 목록 + 색상 동적 읽기 ────────────
     # 가격 패널을 열지 않고 현재 DOM에서 등급 행을 스캔한다.
     def _scan_grades(self):
@@ -285,7 +316,7 @@ class MacroThread(QThread):
             if (txt.length>40) continue;
             if (!/석|존/.test(txt)) continue;        // 등급명에 '석' 또는 '존'
             if (!/원/.test(txt)) continue;           // 가격 포함 행
-            var name = txt.replace(/[\d,]+\s*원.*/,'').replace(/\s+/g,' ').trim();
+            var name = txt.replace(/[\d,]+\s*원.*/,'').replace(/\d+\s*석/g,'').replace(/잔여|매진/g,'').replace(/\s+/g,' ').trim();
             if (!name || name.length<2 || seen[name]) continue;
             // 색상 swatch (배경색) 찾기
             var color = null;
@@ -311,17 +342,32 @@ class MacroThread(QThread):
         except:
             return []
 
-    # ── 등급 목록 읽기 ────────────────────────
-    # 1) 가격 패널을 열지 않고 DOM 스캔 → 보이지 않게 처리 (문제 1/3)
-    # 2) 못 읽으면 폴백으로 패널을 잠깐 열었다 닫고 읽음
+    # ── 등급 목록 읽기 (모든 프레임 재귀 스캔) ──
+    def _dedup_grades(self, rows):
+        seen, out = set(), []
+        for r in rows:
+            n = (r or {}).get('name')
+            if n and n not in seen:
+                seen.add(n); out.append(r)
+        return out
+
     def _get_grades(self):
-        rows = self._scan_grades()
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        rows = self._dedup_grades(self._collect_all_frames(self._scan_grades))
+        try: drv.switch_to.default_content()
+        except Exception: pass
         if rows:
             return rows
-        # 폴백: 가격 패널을 열어 읽은 뒤 곧바로 닫음
+        # 폴백: 가격 패널을 열어 다시 시도
         self._open_price_panel()
         self._wait(0.4)
-        rows = self._scan_grades()
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        rows = self._dedup_grades(self._collect_all_frames(self._scan_grades))
+        try: drv.switch_to.default_content()
+        except Exception: pass
         self._close_price_panel()
         return rows
 
@@ -362,25 +408,33 @@ class MacroThread(QThread):
 
     # ── 구역 목록 동적 읽기 (label + color) ─────
     # 반환: [{'label': '101', 'color': [r,g,b] or None}, ...]
+    # poticket BookMain.asp 는 구역이 중첩 iframe(이미지맵 area 태그 또는
+    # SVG/HTML) 안에 있으므로 모든 프레임을 재귀로 훑는다.
     def _get_zones(self):
         drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        allz = self._collect_all_frames(self._scan_zones_current_frame)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        # 이미지맵(area 태그)로 찾은 게 있으면 우선 사용(가장 정확), 없으면 JS 결과
+        area = [z for z in allz if z.get('src') == 'area']
+        return self._dedup_zones(area if area else allz)
+
+    # ── 한 프레임 안에서 구역 수집 ─────────────
+    # (1) area 태그 이미지맵 (2) JS 텍스트/도형 스캔
+    def _scan_zones_current_frame(self):
+        drv = self.driver
         zones = []
-        # 1) BookMain.asp (iframe) - area 태그 title/alt (색상 없음)
+        # (1) area 태그 (BookMain.asp 좌석 이미지맵)
         try:
-            drv.switch_to.default_content()
-            self._to_frame("ifrmSeat", "mainFrame")
             for a in drv.find_elements(By.TAG_NAME, "area"):
                 t = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
-                if t: zones.append({'label': t, 'color': None})
-            drv.switch_to.default_content()
-        except:
-            try: drv.switch_to.default_content()
-            except: pass
-        if zones:
-            return self._dedup_zones(zones)
-        # 2) motickets (SVG/HTML)
-        #    라벨(001,101 등) 텍스트를 먼저 찾고, 그 부모/형제 도형의
-        #    fill/배경색을 읽어 등급 색상과 짝지음.
+                if t:
+                    zones.append({'label': t, 'color': None, 'src': 'area'})
+        except Exception:
+            pass
+        # (2) SVG/HTML 텍스트+도형 스캔
         js = r"""
         function toRGB(s){
             if(!s) return null;
@@ -438,28 +492,13 @@ class MacroThread(QThread):
         }
         return out;
         """
-        # default content + 모든 iframe 안에서 시도
-        zones = self._run_zone_js(js)
-        if not zones:
-            try:
-                frames = drv.find_elements(By.TAG_NAME, "iframe")
-            except:
-                frames = []
-            for fr in frames:
-                try:
-                    drv.switch_to.default_content()
-                    drv.switch_to.frame(fr)
-                    zones = self._run_zone_js(js)
-                    if zones: break
-                except:
-                    pass
-            try: drv.switch_to.default_content()
-            except: pass
-        return self._dedup_zones(zones)
-
-    def _run_zone_js(self, js):
-        try: return self.driver.execute_script(js) or []
-        except: return []
+        try:
+            for z in (drv.execute_script(js) or []):
+                z['src'] = 'js'
+                zones.append(z)
+        except Exception:
+            pass
+        return zones
 
     def _dedup_zones(self, items):
         seen, out = set(), []
@@ -940,19 +979,19 @@ class MacroThread(QThread):
                 known = 1
             for _ in range(1800):
                 self._wait(1)
-                # 현재 창이 이미 예매 페이지면 완료
+                # 현재 창이 예매 페이지면 완료 (도달 시 딱 한 번만 로그)
                 try:
                     if any(k in self.driver.current_url for k in booking_kw):
+                        self.log("→ 예매창으로 전환 완료")
                         break
                 except Exception:
                     pass
-                # 새 창이 열렸을 때만(개수 증가) 가장 최근 창으로 한 번 전환
+                # 새 창이 열리면(개수 증가) 가장 최근 창으로 조용히 전환
                 try:
                     handles = self.driver.window_handles
                     if len(handles) > known:
                         known = len(handles)
                         self.driver.switch_to.window(handles[-1])
-                        self.log("→ 새 예매창으로 전환")
                         self._wait(1.5)
                 except Exception:
                     pass
