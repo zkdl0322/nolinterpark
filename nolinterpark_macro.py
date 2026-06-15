@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import re
 import sys
 import time
 import threading
@@ -427,11 +428,23 @@ class MacroThread(QThread):
         drv = self.driver
         zones = []
         # (1) area 태그 (BookMain.asp 좌석 이미지맵)
+        # 구역 번호는 이미지에 그려져 있어 DOM 텍스트엔 없는 경우가 많다.
+        # title/alt 가 있으면 그걸 쓰고, 없으면 href 에서 구역 식별자를 뽑아낸다.
+        # 클릭은 href(자바스크립트) 실행이 가장 확실하므로 href 도 함께 보관한다.
         try:
             for a in drv.find_elements(By.TAG_NAME, "area"):
-                t = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
-                if t:
-                    zones.append({'label': t, 'color': None, 'src': 'area'})
+                title = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
+                href  = (a.get_attribute("href") or "").strip()
+                label = title
+                if not label and href:
+                    # href 안의 숫자(구역번호 후보)를 라벨로 사용
+                    m = re.findall(r"\d{1,4}", href)
+                    if m:
+                        label = m[-1]
+                if not label:
+                    continue
+                zones.append({'label': label, 'color': None,
+                              'src': 'area', 'href': href})
         except Exception:
             pass
         # (2) SVG/HTML 텍스트+도형 스캔
@@ -501,11 +514,12 @@ class MacroThread(QThread):
         return zones
 
     def _dedup_zones(self, items):
+        # href가 있으면 href로(서로 다른 area 모두 유지), 없으면 label로 중복 제거
         seen, out = set(), []
         for x in items:
-            lbl = x.get('label', '')
-            if lbl and lbl not in seen:
-                seen.add(lbl); out.append(x)
+            key = x.get('href') or x.get('label', '')
+            if key and key not in seen:
+                seen.add(key); out.append(x)
         return out
 
     def _dedup(self, items):
@@ -541,10 +555,10 @@ class MacroThread(QThread):
         else:
             for i, z in enumerate(zone_list, 1):
                 self.log(f"{i}. {z['label']}")
-        self.log("구역을 번호로 입력해주세요. ','로 구분하여 여러개 입력 가능합니다.")
+        self.log("구역 번호 입력(','로 여러개). 그냥 Enter 시 전체 구역을 순회합니다.")
         ans = self._ask(timeout=120)
-        labels = [z['label'] for z in zone_list]
-        if not ans: return labels
+        if not ans:
+            return zone_list            # 전체 구역 순회
         self.log(f"→ {ans}")
         selected = []
         for part in ans.split(","):
@@ -553,12 +567,12 @@ class MacroThread(QThread):
             try:
                 idx = int(part) - 1
                 if 0 <= idx < len(zone_list):
-                    selected.append(zone_list[idx]['label'])
+                    selected.append(zone_list[idx])
                 else:
-                    selected.append(part)
+                    selected.append({'label': part, 'href': '', 'color': None})
             except:
-                selected.append(part)
-        return selected if selected else labels
+                selected.append({'label': part, 'href': '', 'color': None})
+        return selected if selected else zone_list
 
     # ── 좌석 클릭 ─────────────────────────────
     # grade: {'name','color':[r,g,b]} 또는 None(모두)
@@ -641,23 +655,60 @@ class MacroThread(QThread):
         return cands.length;
         """
         try:
-            n = drv.execute_script(js, target)
-            if n and n > 0:
-                gname = (grade or {}).get("name", "모두")
-                self.log(f"[{gname}] 예매 가능 좌석 발견 → 클릭 (후보 {n}개)")
-                self._wait(1.2)
-                # 하단에 좌석 선택 정보(티켓가격선택/총 N매)가 나타났는지 확인
-                if "티켓가격선택" in self._src() or "총" in self._src():
-                    self._close_seat_panel()   # 잔여좌석 안내 패널 닫기 (문제 3)
-                    return True
-                self._wait(0.8)
-                if "티켓가격선택" in self._src() or "총" in self._src():
-                    self._close_seat_panel()
-                    return True
-                return False
+            drv.switch_to.default_content()
+        except Exception:
+            pass
+        try:
+            n = self._click_seat_recursive(js, target, 0)
         except Exception as e:
             self.log(f"좌석 클릭 오류: {str(e)[:80]}")
+            n = 0
+        if n and n > 0:
+            gname = (grade or {}).get("name", "모두")
+            self.log(f"[{gname}] 예매 가능 좌석 발견 → 클릭 (후보 {n}개)")
+            self._wait(1.2)
+            # 클릭한 프레임에 좌석 선택 정보(티켓가격선택/총 N매)가 나타났는지 확인
+            if "티켓가격선택" in self._src() or "총" in self._src():
+                self._close_seat_panel()   # 잔여좌석 안내 패널 닫기
+                return True
+            self._wait(0.8)
+            if "티켓가격선택" in self._src() or "총" in self._src():
+                self._close_seat_panel()
+                return True
         return False
+
+    # 모든 프레임을 재귀로 훑어 좌석 클릭 시도. 클릭 성공 시 후보 수 반환,
+    # 성공한 프레임에 머무른다(이후 _src() 확인을 위해).
+    def _click_seat_recursive(self, js, target, depth):
+        drv = self.driver
+        try:
+            n = drv.execute_script(js, target)
+        except Exception:
+            n = 0
+        if n and n > 0:
+            return n
+        if depth >= 4:
+            return 0
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
+            try:
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                n = self._click_seat_recursive(js, target, depth + 1)
+                if n and n > 0:
+                    return n
+                drv.switch_to.parent_frame()
+            except Exception:
+                try: drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return 0
 
     # ── 퍼즐 슬라이더 ─────────────────────────
     def _solve_puzzle(self):
@@ -707,33 +758,87 @@ class MacroThread(QThread):
                 ac.release().perform(); self._wait(1.2)
             except Exception as e: self.log(f"슬라이더 오류: {e}")
 
-    # ── 구역 클릭 (iframe area 태그 + JS 겸용) ──
-    def _click_zone(self, zone_num):
+    # ── 구역 클릭 ─────────────────────────────
+    # zone: {'label','href',...} 또는 라벨 문자열.
+    # 이미지맵은 href(자바스크립트) 실행이 가장 확실하므로 모든 프레임을
+    # 재귀로 훑어 해당 area 의 href 를 실행한다. 없으면 라벨/JS로 폴백.
+    def _click_zone(self, zone):
+        if isinstance(zone, dict):
+            label = zone.get('label', '')
+            href  = zone.get('href', '') or ''
+        else:
+            label, href = str(zone), ''
+        zone_num = label.replace("구역", "").replace("영역", "").strip()
+        if "(" in zone_num:
+            zone_num = zone_num.split("(")[-1].replace(")", "").strip()
+
         drv = self.driver
-        # 1) BookMain.asp (iframe) - area 태그로 클릭
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        if self._click_zone_recursive(zone_num, href, 0):
+            return True
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        return False
+
+    # 모든 프레임을 재귀로 훑어 구역(area) 클릭 시도. 성공 시 그 프레임에 머무름.
+    def _click_zone_recursive(self, zone_num, href, depth):
+        drv = self.driver
+        if self._click_zone_in_frame(zone_num, href):
+            return True
+        if depth >= 4:
+            return False
         try:
-            drv.switch_to.default_content()
-            self._to_frame("ifrmSeat", "mainFrame")
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
+            try:
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                if self._click_zone_recursive(zone_num, href, depth + 1):
+                    return True
+                drv.switch_to.parent_frame()
+            except Exception:
+                try: drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return False
+
+    # 현재 프레임 안에서만 구역 클릭 시도 (프레임 전환 없음)
+    def _click_zone_in_frame(self, zone_num, href):
+        drv = self.driver
+        # 1) 보관해 둔 href 와 일치하는 area 실행 (가장 정확)
+        if href:
+            try:
+                for area in drv.find_elements(By.TAG_NAME, "area"):
+                    if (area.get_attribute("href") or "") == href:
+                        if href.startswith("javascript:"):
+                            drv.execute_script(href[len("javascript:"):])
+                        else:
+                            drv.execute_script("arguments[0].click();", area)
+                        return True
+            except Exception:
+                pass
+        # 2) area 의 title/alt/href 에 구역번호가 들어있으면 실행
+        try:
             for area in drv.find_elements(By.TAG_NAME, "area"):
                 t = (area.get_attribute("title") or
                      area.get_attribute("alt") or "").strip()
-                if t == zone_num or t == zone_num + "구역" or t == zone_num + "영역":
-                    drv.execute_script("arguments[0].click();", area)
-                    drv.switch_to.default_content()
+                ah = area.get_attribute("href") or ""
+                if (t == zone_num or t == zone_num + "구역" or t == zone_num + "영역"
+                        or (zone_num and zone_num in ah)):
+                    if ah.startswith("javascript:"):
+                        drv.execute_script(ah[len("javascript:"):])
+                    else:
+                        drv.execute_script("arguments[0].click();", area)
                     return True
-            # href 방식
-            for area in drv.find_elements(By.TAG_NAME, "area"):
-                href = area.get_attribute("href") or ""
-                if zone_num in href:
-                    drv.execute_script(href.replace("javascript:", ""))
-                    drv.switch_to.default_content()
-                    return True
-            drv.switch_to.default_content()
-        except:
-            try: drv.switch_to.default_content()
-            except: pass
-
-        # 2) motickets (SPA) - JS 텍스트/속성 검색
+        except Exception:
+            pass
+        # 3) SPA/일반 요소 - JS 텍스트/속성 검색
         js = r"""
         var target = arguments[0];
         function tryClick(el){
@@ -785,13 +890,8 @@ class MacroThread(QThread):
                     self.log("브라우저가 종료되어 순회를 중단합니다."); return
 
                 try:
-                    # 구역번호 정규화: "가(001)"→"001", "206영역"→"206", "105구역"→"105"
-                    zone_num = zone.replace("구역", "").replace("영역", "").strip()
-                    if "(" in zone_num:
-                        zone_num = zone_num.split("(")[-1].replace(")", "").strip()
-
-                    # 구역 클릭 (실패해도 다음 구역으로)
-                    if not self._click_zone(zone_num):
+                    # 구역 클릭 (실패해도 다음 구역으로). zone 은 dict 또는 문자열.
+                    if not self._click_zone(zone):
                         continue
 
                     self._wait(self.delay)
@@ -1006,9 +1106,11 @@ class MacroThread(QThread):
             grade, grade_list = self._ask_grade()
             self._wait(0.3)
 
-            # ⑤ 구역 선택 (선택한 등급 색상으로 필터링)
+            # ⑤ 구역 선택 (zones = 구역 dict 리스트)
             zones = self._ask_zones(grade)
-            self.log(f"선택 구역: {', '.join(zones) if zones else '전체'}")
+            zone_labels = [z.get('label', '') for z in zones] if zones else []
+            self.log(f"선택 구역: {', '.join(zone_labels) if zone_labels else '전체'} "
+                     f"({len(zones)}개)")
             self._wait(0.3)
 
             # ⑥ 구역 순회 + 좌석 클릭
