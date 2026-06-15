@@ -104,6 +104,39 @@ class MacroThread(QThread):
         try: return self.driver.page_source
         except: return ""
 
+    # ── 예매(poticket) 새 창으로 전환 ─────────
+    # [예매하기]를 누르면 poticket.interpark.com 예매창이 새 창으로 열린다.
+    # Selenium은 자동으로 새 창으로 전환되지 않으므로 모든 창 핸들을 훑어
+    # 예매 URL을 가진 창을 찾아 전환한다. (못 찾으면 원래 창 복귀 후 False)
+    def _switch_to_booking_window(self, keywords):
+        drv = self.driver
+        try:
+            handles = list(drv.window_handles)
+            origin  = drv.current_window_handle
+        except Exception:
+            return False
+        # 현재 창이 이미 예매창이면 그대로 사용
+        try:
+            if any(k in drv.current_url for k in keywords):
+                return True
+        except Exception:
+            pass
+        # 다른 창들을 훑어 예매 URL을 가진 창으로 전환
+        for h in handles:
+            try:
+                drv.switch_to.window(h)
+                if any(k in drv.current_url for k in keywords):
+                    self.log("→ 예매창(새 창)으로 전환")
+                    return True
+            except Exception:
+                continue
+        # 못 찾으면 원래 창으로 복귀
+        try:
+            drv.switch_to.window(origin)
+        except Exception:
+            pass
+        return False
+
     # ── 로그인 완료 감지 ──────────────────────
     # 로그인 후 accounts.yanolja.com/myaccount 또는 nol.yanolja.com 으로 이동
     def _is_logged_in(self):
@@ -947,12 +980,12 @@ class MacroThread(QThread):
                 if "nol.interpark.com" in self._url():
                     break
 
-            # ② 예매 페이지 대기
+            # ② 예매 페이지 대기 (예매창은 새 창으로 열리므로 핸들 전환 필요)
             self.log("원하시는 링크에 들어가서 [예매하기] 버튼을 눌러 주세요.")
+            booking_kw = ("poticket", "Book", "motickets")
             for _ in range(1800):
                 self._wait(1)
-                url = self._url()
-                if "poticket" in url or "Book" in url or "motickets" in url:
+                if self._switch_to_booking_window(booking_kw):
                     break
             self._wait(2)
 
