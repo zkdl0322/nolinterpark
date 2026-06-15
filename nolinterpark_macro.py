@@ -437,8 +437,8 @@ class MacroThread(QThread):
         except Exception:
             return zones
 
-    # ── area(구역) 중심 좌표 계산 ─────────────
-    def _area_center(self, shape, coords):
+    # ── area(구역) 경계 박스 계산 (natural 좌표) ──
+    def _area_bbox(self, shape, coords):
         try:
             nums = [float(x) for x in re.split(r"[ ,]+", (coords or '').strip()) if x != '']
         except Exception:
@@ -446,16 +446,19 @@ class MacroThread(QThread):
         if not nums:
             return None
         shape = (shape or '').lower()
-        if shape == 'circle' and len(nums) >= 2:
-            return (nums[0], nums[1])
+        if shape == 'circle' and len(nums) >= 3:
+            cx, cy, r = nums[0], nums[1], nums[2]
+            return (cx - r, cy - r, cx + r, cy + r)
         if shape == 'rect' and len(nums) >= 4:
-            return ((nums[0] + nums[2]) / 2.0, (nums[1] + nums[3]) / 2.0)
+            return (min(nums[0], nums[2]), min(nums[1], nums[3]),
+                    max(nums[0], nums[2]), max(nums[1], nums[3]))
         xs, ys = nums[0::2], nums[1::2]
         if xs and ys:
-            return (sum(xs) / len(xs), sum(ys) / len(ys))
+            return (min(xs), min(ys), max(xs), max(ys))
         return None
 
-    # ── 좌석배치도 이미지에서 각 구역 색 샘플링 ──
+    # ── 좌석배치도 이미지에서 각 구역의 채움색 샘플링 ──
+    # 구역 영역 안을 격자로 찍어 가장 많이 나온 유채색을 그 구역 색으로 본다.
     # 반환: areas 와 같은 길이의 [r,g,b] 또는 None 리스트
     def _sample_area_colors(self, areas):
         drv = self.driver
@@ -495,26 +498,29 @@ class MacroThread(QThread):
                 return False
             return True
 
-        offsets = [(0, 0), (-7, 0), (7, 0), (0, -7), (0, 7), (-7, -7), (7, 7)]
         for idx, a in enumerate(areas):
-            pt = self._area_center(a.get('shape', ''), a.get('coords', ''))
-            if not pt:
+            box = self._area_bbox(a.get('shape', ''), a.get('coords', ''))
+            if not box:
                 continue
-            cx, cy = pt[0] * sx, pt[1] * sy
-            found = None
-            for dx, dy in offsets:
-                x, y = int(cx + dx), int(cy + dy)
-                if 0 <= x < sw and 0 <= y < sh:
-                    rgb = px[x, y]
-                    if colored(rgb):
-                        found = [rgb[0], rgb[1], rgb[2]]
-                        break
-            if found is None:
-                x, y = int(cx), int(cy)
-                if 0 <= x < sw and 0 <= y < sh:
-                    rgb = px[x, y]
-                    found = [rgb[0], rgb[1], rgb[2]]
-            colors[idx] = found
+            x0, y0, x1, y1 = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
+            # 테두리/라벨 영향을 줄이려 중앙 60% 영역만 격자 샘플링
+            w, h = x1 - x0, y1 - y0
+            ax0, ay0 = x0 + w * 0.2, y0 + h * 0.2
+            ax1, ay1 = x1 - w * 0.2, y1 - h * 0.2
+            counts = {}
+            steps = 6
+            for ix in range(steps + 1):
+                for iy in range(steps + 1):
+                    x = int(ax0 + (ax1 - ax0) * ix / steps)
+                    y = int(ay0 + (ay1 - ay0) * iy / steps)
+                    if 0 <= x < sw and 0 <= y < sh:
+                        rgb = px[x, y]
+                        if colored(rgb):
+                            key = (rgb[0] // 12 * 12, rgb[1] // 12 * 12, rgb[2] // 12 * 12)
+                            counts[key] = counts.get(key, 0) + 1
+            if counts:
+                best = max(counts.items(), key=lambda kv: kv[1])[0]
+                colors[idx] = [best[0], best[1], best[2]]
         return colors
 
     # ── 한 프레임 안에서 구역 수집 ─────────────
@@ -645,7 +651,7 @@ class MacroThread(QThread):
             def _color_match(zc):
                 if not zc: return False
                 d = abs(zc[0]-grade_color[0]) + abs(zc[1]-grade_color[1]) + abs(zc[2]-grade_color[2])
-                return d <= 120
+                return d <= 70
             filtered = [z for z in all_zones if _color_match(z.get('color'))]
             if filtered:
                 self.log(f"[등급 필터] {grade['name']}(색 {grade_color}) 구역 {len(filtered)}개 표시")
