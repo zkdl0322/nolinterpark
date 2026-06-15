@@ -125,115 +125,84 @@ class MacroThread(QThread):
             or "myaccount" in url
         )
 
-    # ── 캡챠 입력창 요소 찾기 (iframe 포함) ──
-    # 캡챠 전용 placeholder만 엄격하게 매칭 (다른 입력창 오인 방지)
-    def _find_captcha_input(self):
+    # ── 안심예매 보안문자(캡챠) 감지 ───────────
+    # poticket BookMain.asp 는 중첩 iframe 구조라 모든 프레임을 재귀로 훑는다.
+    # 보이는 캡챠 입력창 또는 안심예매 안내문이 발견되면 True.
+    def _captcha_present(self):
         drv = self.driver
+        try:
+            drv.switch_to.default_content()
+        except Exception:
+            return False
+        found = self._scan_captcha(0)
+        try:
+            drv.switch_to.default_content()
+        except Exception:
+            pass
+        return found
+
+    def _scan_captcha(self, depth):
+        drv = self.driver
+        # 1) 현재 프레임에서 캡챠 입력창 탐지 (넓은 셀렉터)
         input_sels = [
-            "input[placeholder*='문자를 입력해주세요']",
-            ".captcha_input input",
-            "#captchaInput",
+            "input[placeholder*='문자']",
+            "input[id*='aptcha']",
+            "input[name*='aptcha']",
+            "#txtCaptcha", "#captchaInput",
+            ".captcha_input input", ".capchaInner input",
         ]
-        # 1) 현재 컨텍스트에서 탐색
         for sel in input_sels:
             try:
-                el = drv.find_element(By.CSS_SELECTOR, sel)
-                if el.is_displayed(): return el
-            except: pass
-        # 2) 모든 iframe 시도
+                for el in drv.find_elements(By.CSS_SELECTOR, sel):
+                    if el.is_displayed():
+                        return True
+            except Exception:
+                pass
+        # 2) 텍스트 기반 (안심예매 보안문자 안내문)
         try:
-            frames = drv.find_elements(By.TAG_NAME, "iframe")
-        except: frames = []
-        for frame in frames:
-            try:
-                drv.switch_to.frame(frame)
-                for sel in input_sels:
-                    try:
-                        el = drv.find_element(By.CSS_SELECTOR, sel)
-                        if el.is_displayed(): return el
-                    except: pass
-                drv.switch_to.default_content()
-            except:
-                drv.switch_to.default_content()
-        return None
-
-    # ── 안심예매 캡챠 팝업 감지 ────────────────
-    # 캡챠 전용 입력창(문자를 입력해주세요)이 실제로 화면에 보일 때만 True
-    def _captcha_visible(self):
-        drv = self.driver
-        try:
-            drv.switch_to.default_content()
-            return self._find_captcha_input() is not None
-        except:
-            return False
-
-    # ── 안심예매 캡챠 처리 ────────────────────
-    def _handle_captcha(self):
-        drv = self.driver
-
-        for attempt in range(10):
-            drv.switch_to.default_content()
-            if not self._captcha_visible():
-                self.log("→ 캡챠 통과"); return True
-
-            self.log("보안 문자를 입력해주세요. 없을 경우, 0을 입력해주세요 →")
-            ans = self._ask(timeout=90)
-            if ans is None:
-                self.log("입력 시간 초과"); return False
-            self.log(f"→ {ans}")
-
-            if ans.strip() == "0":
+            src = drv.page_source
+            if "부정예매방지" in src and "문자를 입력" in src:
                 return True
-
+        except Exception:
+            pass
+        if depth >= 3:
+            return False
+        # 3) 하위 iframe 재귀 탐색
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
             try:
-                drv.switch_to.default_content()
-                inp = self._find_captcha_input()
-                if not inp:
-                    self.log("입력창을 찾지 못했습니다"); return False
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                if self._scan_captcha(depth + 1):
+                    return True
+                drv.switch_to.parent_frame()
+            except Exception:
+                try:
+                    drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return False
 
-                inp.clear()
-                inp.send_keys(ans)
-                self._wait(0.3)
-
-                # 입력완료 버튼 클릭
-                confirmed = False
-                for bsel in [
-                    "//button[contains(text(),'입력완료')]",
-                    "//a[contains(text(),'입력완료')]",
-                    "//button[contains(text(),'확인')]",
-                    "//input[@type='submit']",
-                ]:
-                    try:
-                        btn = drv.find_element(By.XPATH, bsel)
-                        if btn.is_displayed():
-                            drv.execute_script("arguments[0].click();", btn)
-                            confirmed = True; break
-                    except: pass
-
-                if not confirmed:
-                    for bsel in [".btn_ok", ".btn_confirm", "button.confirm",
-                                 "button[type='submit']"]:
-                        try:
-                            el = drv.find_element(By.CSS_SELECTOR, bsel)
-                            if el.is_displayed():
-                                drv.execute_script("arguments[0].click();", el)
-                                confirmed = True; break
-                        except: pass
-
-                drv.switch_to.default_content()
-                self._wait(2.0)  # 제출 후 충분히 대기
-
-            except Exception as e:
-                self.log(f"캡챠 처리 오류: {e}")
-                drv.switch_to.default_content()
-                continue
-
-            drv.switch_to.default_content()
-            if not self._captcha_visible():
-                self.log("→ 캡챠 통과"); return True
-
-            self.log(f"캡챠 재시도 ({attempt+1}/10)")
-
+    # ── 안심예매 보안문자 통과 대기 ────────────
+    # 자동 입력은 중첩 iframe/캡챠 변형에 취약하므로, 사용자가 예매창에서
+    # 직접 보안문자를 입력하도록 안내하고 캡챠가 사라질 때까지 대기한다.
+    def _wait_captcha_cleared(self, timeout=300):
+        self.log("안심예매 보안문자가 떴습니다.")
+        self.log("→ 예매창에서 직접 보안문자를 입력하고 [입력완료]를 눌러주세요.")
+        self.log("  통과되면 자동으로 다음 단계로 진행합니다...")
+        end = time.time() + timeout
+        while time.time() < end:
+            self._wait(1.0)
+            if not self._captcha_present():
+                self.log("→ 보안문자 통과 확인")
+                return True
+        self.log("보안문자 대기 시간 초과")
         return False
 
     # ── 텍스트 버튼 클릭 헬퍼 ─────────────────
@@ -964,7 +933,7 @@ class MacroThread(QThread):
             # 매초 창을 번갈아 전환하면 두 창이 계속 새로고침되므로,
             # 창 개수가 늘어났을 때(=새 예매창 등장)만 그 창으로 "한 번" 전환한다.
             self.log("원하시는 링크에 들어가서 [예매하기] 버튼을 눌러 주세요.")
-            booking_kw = ("poticket", "Book", "motickets")
+            booking_kw = ("poticket", "Book")  # NOL 인터파크 예매창 = poticket
             try:
                 known = len(self.driver.window_handles)
             except Exception:
@@ -989,9 +958,9 @@ class MacroThread(QThread):
                     pass
             self._wait(2)
 
-            # ③ 안심예매 캡챠 처리
-            if self._captcha_visible():
-                self._handle_captcha()
+            # ③ 안심예매 보안문자: 예매창에서 직접 입력 → 통과 대기
+            if self._captcha_present():
+                self._wait_captcha_cleared()
                 self._wait(1)
 
             # ④ 좌석 등급 선택 (페이지에서 동적으로 읽음)
