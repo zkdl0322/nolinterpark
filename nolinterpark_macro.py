@@ -437,31 +437,122 @@ class MacroThread(QThread):
         except Exception:
             return zones
 
+    # ── area(구역) 중심 좌표 계산 ─────────────
+    def _area_center(self, shape, coords):
+        try:
+            nums = [float(x) for x in re.split(r"[ ,]+", (coords or '').strip()) if x != '']
+        except Exception:
+            return None
+        if not nums:
+            return None
+        shape = (shape or '').lower()
+        if shape == 'circle' and len(nums) >= 2:
+            return (nums[0], nums[1])
+        if shape == 'rect' and len(nums) >= 4:
+            return ((nums[0] + nums[2]) / 2.0, (nums[1] + nums[3]) / 2.0)
+        xs, ys = nums[0::2], nums[1::2]
+        if xs and ys:
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+        return None
+
+    # ── 좌석배치도 이미지에서 각 구역 색 샘플링 ──
+    # 반환: areas 와 같은 길이의 [r,g,b] 또는 None 리스트
+    def _sample_area_colors(self, areas):
+        drv = self.driver
+        colors = [None] * len(areas)
+        # usemap 이미지(좌석배치도) 찾기 - 가장 큰 것
+        img = None
+        try:
+            imgs = drv.find_elements(By.CSS_SELECTOR, "img[usemap]")
+            if imgs:
+                img = max(imgs, key=lambda e: (e.size.get('width', 0) *
+                                               e.size.get('height', 0)) if e.size else 0)
+        except Exception:
+            img = None
+        if img is None:
+            return colors
+        try:
+            im = Image.open(io.BytesIO(img.screenshot_as_png)).convert("RGB")
+        except Exception:
+            return colors
+        sw, sh = im.size
+        try:
+            nat = drv.execute_script(
+                "var i=arguments[0];return [i.naturalWidth,i.naturalHeight];", img)
+            nw = nat[0] or sw
+            nh = nat[1] or sh
+        except Exception:
+            nw, nh = sw, sh
+        sx = sw / float(nw) if nw else 1.0
+        sy = sh / float(nh) if nh else 1.0
+        px = im.load()
+
+        def colored(rgb):
+            r, g, b = rgb[0], rgb[1], rgb[2]
+            if r > 235 and g > 235 and b > 235:           # 흰색/배경
+                return False
+            if max(r, g, b) - min(r, g, b) < 22 and 90 < min(r, g, b) < 215:  # 회색
+                return False
+            return True
+
+        offsets = [(0, 0), (-7, 0), (7, 0), (0, -7), (0, 7), (-7, -7), (7, 7)]
+        for idx, a in enumerate(areas):
+            pt = self._area_center(a.get('shape', ''), a.get('coords', ''))
+            if not pt:
+                continue
+            cx, cy = pt[0] * sx, pt[1] * sy
+            found = None
+            for dx, dy in offsets:
+                x, y = int(cx + dx), int(cy + dy)
+                if 0 <= x < sw and 0 <= y < sh:
+                    rgb = px[x, y]
+                    if colored(rgb):
+                        found = [rgb[0], rgb[1], rgb[2]]
+                        break
+            if found is None:
+                x, y = int(cx), int(cy)
+                if 0 <= x < sw and 0 <= y < sh:
+                    rgb = px[x, y]
+                    found = [rgb[0], rgb[1], rgb[2]]
+            colors[idx] = found
+        return colors
+
     # ── 한 프레임 안에서 구역 수집 ─────────────
     # (1) area 태그 이미지맵 (2) JS 텍스트/도형 스캔
     def _scan_zones_current_frame(self):
         drv = self.driver
         zones = []
         # (1) area 태그 (BookMain.asp 좌석 이미지맵)
-        # 구역 번호는 이미지에 그려져 있어 DOM 텍스트엔 없는 경우가 많다.
-        # title/alt 가 있으면 그걸 쓰고, 없으면 href 에서 구역 식별자를 뽑아낸다.
+        # 구역 번호/등급색은 이미지에 그려져 있어 DOM 엔 없다. 따라서 좌석배치도
+        # 이미지를 캡처해 각 구역(area) 위치의 픽셀 색을 샘플링해 등급색으로 쓴다.
         # 클릭은 href(자바스크립트) 실행이 가장 확실하므로 href 도 함께 보관한다.
+        areas = []
         try:
             for a in drv.find_elements(By.TAG_NAME, "area"):
-                title = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
-                href  = (a.get_attribute("href") or "").strip()
+                title  = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
+                href   = (a.get_attribute("href") or "").strip()
+                coords = (a.get_attribute("coords") or "").strip()
+                shape  = (a.get_attribute("shape") or "").strip()
                 label = title
                 if not label and href:
-                    # href 안의 숫자(구역번호 후보)를 라벨로 사용
                     m = re.findall(r"\d{1,4}", href)
                     if m:
                         label = m[-1]
                 if not label:
                     continue
-                zones.append({'label': label, 'color': None,
-                              'src': 'area', 'href': href})
+                areas.append({'label': label, 'href': href,
+                              'coords': coords, 'shape': shape})
         except Exception:
             pass
+        if areas:
+            try:
+                cols = self._sample_area_colors(areas)
+            except Exception:
+                cols = [None] * len(areas)
+            for idx, a in enumerate(areas):
+                zones.append({'label': a['label'], 'href': a['href'],
+                              'color': cols[idx] if idx < len(cols) else None,
+                              'src': 'area'})
         # (2) SVG/HTML 텍스트+도형 스캔
         js = r"""
         function toRGB(s){
@@ -554,13 +645,13 @@ class MacroThread(QThread):
             def _color_match(zc):
                 if not zc: return False
                 d = abs(zc[0]-grade_color[0]) + abs(zc[1]-grade_color[1]) + abs(zc[2]-grade_color[2])
-                return d <= 90
+                return d <= 120
             filtered = [z for z in all_zones if _color_match(z.get('color'))]
             if filtered:
-                self.log(f"[등급 필터] {grade['name']} 색상에 맞는 구역 {len(filtered)}개 표시")
+                self.log(f"[등급 필터] {grade['name']}(색 {grade_color}) 구역 {len(filtered)}개 표시")
                 zone_list = filtered
             else:
-                self.log("색상 필터링 결과 없음 → 전체 구역 표시")
+                self.log(f"색상 일치 구역 없음(등급색 {grade_color}) → 전체 표시")
                 zone_list = all_zones
         else:
             zone_list = all_zones
