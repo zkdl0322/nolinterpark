@@ -109,33 +109,24 @@ class MacroThread(QThread):
 
     # ── 예매(poticket) 새 창으로 전환 ─────────
     # [예매하기]를 누르면 poticket.interpark.com 예매창이 새 창으로 열린다.
-    # Selenium은 자동으로 새 창으로 전환되지 않으므로 모든 창 핸들을 훑어
-    # 예매 URL을 가진 창을 찾아 전환한다. (못 찾으면 원래 창 복귀 후 False)
+    # 모든 창을 매번 순회/복귀하면 창 focus가 계속 바뀌어 두 창이 번갈아
+    # 새로고침되므로, 가장 최근에 열린 창(예매 팝업) 하나만 확인한다.
     def _switch_to_booking_window(self, keywords):
         drv = self.driver
-        try:
-            handles = list(drv.window_handles)
-            origin  = drv.current_window_handle
-        except Exception:
-            return False
-        # 현재 창이 이미 예매창이면 그대로 사용
+        # 현재 창이 이미 예매 페이지면 전환 불필요 (focus 건드리지 않음)
         try:
             if any(k in drv.current_url for k in keywords):
                 return True
         except Exception:
             pass
-        # 다른 창들을 훑어 예매 URL을 가진 창으로 전환
-        for h in handles:
-            try:
-                drv.switch_to.window(h)
+        # 창이 여러 개일 때만, 가장 최근 창으로 한 번 전환해 확인
+        try:
+            handles = drv.window_handles
+            if len(handles) > 1:
+                drv.switch_to.window(handles[-1])
                 if any(k in drv.current_url for k in keywords):
                     self.log("→ 예매창(새 창)으로 전환")
                     return True
-            except Exception:
-                continue
-        # 못 찾으면 원래 창으로 복귀
-        try:
-            drv.switch_to.window(origin)
         except Exception:
             pass
         return False
