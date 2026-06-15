@@ -141,10 +141,22 @@ class MacroThread(QThread):
         return False
 
     # ── 로그인 완료 감지 ──────────────────────
-    # 로그인 후 accounts.yanolja.com/myaccount 또는 nol.yanolja.com 으로 이동
+    # 로그인 페이지(accounts.*)를 벗어나 서비스 도메인(nol/poticket interpark,
+    # nol.yanolja, myaccount)에 도달하면 로그인 완료로 간주한다.
     def _is_logged_in(self):
         url = self._url()
-        return "nol.yanolja.com" in url or "myaccount" in url
+        if not url:
+            return False
+        # 아직 로그인/계정 인증 페이지에 있으면 미완료
+        if "accounts.yanolja.com" in url or "accounts.interpark.com" in url:
+            return False
+        return (
+            "nol.interpark.com" in url
+            or "poticket.interpark.com" in url
+            or "ticket.interpark.com" in url
+            or "nol.yanolja.com" in url
+            or "myaccount" in url
+        )
 
     # ── 캡챠 입력창 요소 찾기 (iframe 포함) ──
     # 캡챠 전용 placeholder만 엄격하게 매칭 (다른 입력창 오인 방지)
@@ -971,10 +983,9 @@ class MacroThread(QThread):
             # 로그인 후 자동 리다이렉트가 끝나길 잠깐 대기 (조기 이동 방지)
             self._wait(2.0)
 
-            # 로그인 직후엔 accounts.yanolja.com / nol.yanolja.com 등으로 가있으므로
-            # 놀 인터파크 메인(nol.interpark.com)으로 "한 번만" 이동시킨다.
-            # (루프로 연속 이동하면 새로고침이 반복되므로 단발 이동으로 처리)
-            if "nol.interpark.com" not in self._url():
+            # 로그인 직후 야놀자 도메인에 있으면 놀 인터파크 메인으로 "한 번만" 이동.
+            # 단, 이미 인터파크 도메인(메인/예매창 등)에 있으면 끌고 가지 않는다.
+            if "interpark.com" not in self._url():
                 try:
                     self.log("→ 놀 인터파크 메인(nol.interpark.com)으로 이동")
                     self.driver.get("https://nol.interpark.com/")
