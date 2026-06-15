@@ -998,7 +998,7 @@ class MacroThread(QThread):
 class ControlWindow(QWidget):
     def __init__(self, driver, delay):
         super().__init__()
-        self.setWindowTitle("인터파크티켓 취소표 매크로")
+        self.setWindowTitle("NOL 인터파크 취소표 매크로")
         self.setFont(QFont("맑은 고딕", 9))
         self.setFixedWidth(310)
 
@@ -1112,7 +1112,7 @@ class ControlWindow(QWidget):
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("인터파크티켓 취소표 매크로")
+        self.setWindowTitle("NOL 인터파크 취소표 매크로")
         self.setFixedWidth(300)
         self.setFont(QFont("맑은 고딕", 10))
         self._ctrl = None
