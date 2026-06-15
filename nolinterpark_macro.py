@@ -967,18 +967,17 @@ class MacroThread(QThread):
             self.log("→ 로그인 완료")
 
             # 로그인 직후엔 accounts.yanolja.com / nol.yanolja.com 등으로 가있으므로
-            # 무조건 놀 인터파크 메인(nol.interpark.com)으로 강제 이동시킨다.
-            # (nol.interpark.com 은 야놀자로 리다이렉트되지 않고 자체 도메인 유지)
+            # 놀 인터파크 메인(nol.interpark.com)으로 이동시킨다.
+            # 이미 nol.interpark.com 이면 재이동하지 않는다(중복 이동/로그 방지).
             for _try in range(6):
+                if "nol.interpark.com" in self._url():
+                    break
                 try:
                     self.log("→ 놀 인터파크 메인(nol.interpark.com)으로 이동")
                     self.driver.get("https://nol.interpark.com/")
                     self._wait(2.5)
                 except:
                     self._wait(1)
-                # 주소창이 실제로 nol.interpark.com 이면 완료
-                if "nol.interpark.com" in self._url():
-                    break
 
             # ② 예매 페이지 대기 (예매창은 새 창으로 열리므로 핸들 전환 필요)
             self.log("원하시는 링크에 들어가서 [예매하기] 버튼을 눌러 주세요.")
