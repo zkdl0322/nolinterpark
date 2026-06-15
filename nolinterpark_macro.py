@@ -82,12 +82,15 @@ class MacroThread(QThread):
 
     # ── 대기 ──────────────────────────────────
     def _wait(self, sec):
+        # sec=0 이어도 정지/일시정지를 최소 한 번은 확인하고 빠져나간다.
         end = time.time() + sec
-        while time.time() < end:
+        while True:
             if self._stop: raise InterruptedError
             while self._pause:
                 if self._stop: raise InterruptedError
                 time.sleep(0.1)
+            if time.time() >= end:
+                return
             time.sleep(0.05)
 
     # ── GUI 입력 요청 ─────────────────────────
@@ -420,7 +423,18 @@ class MacroThread(QThread):
         except Exception: pass
         # 이미지맵(area 태그)로 찾은 게 있으면 우선 사용(가장 정확), 없으면 JS 결과
         area = [z for z in allz if z.get('src') == 'area']
-        return self._dedup_zones(area if area else allz)
+        zones = self._dedup_zones(area if area else allz)
+        return self._sort_zones(zones)
+
+    # 구역을 라벨 속 숫자 기준 오름차순 정렬 (숫자 없으면 뒤로)
+    def _sort_zones(self, zones):
+        def key(z):
+            m = re.search(r"\d+", z.get('label', ''))
+            return (0, int(m.group())) if m else (1, z.get('label', ''))
+        try:
+            return sorted(zones, key=key)
+        except Exception:
+            return zones
 
     # ── 한 프레임 안에서 구역 수집 ─────────────
     # (1) area 태그 이미지맵 (2) JS 텍스트/도형 스캔
@@ -665,16 +679,10 @@ class MacroThread(QThread):
             n = 0
         if n and n > 0:
             gname = (grade or {}).get("name", "모두")
-            self.log(f"[{gname}] 예매 가능 좌석 발견 → 클릭 (후보 {n}개)")
-            self._wait(1.2)
-            # 클릭한 프레임에 좌석 선택 정보(티켓가격선택/총 N매)가 나타났는지 확인
-            if "티켓가격선택" in self._src() or "총" in self._src():
-                self._close_seat_panel()   # 잔여좌석 안내 패널 닫기
-                return True
-            self._wait(0.8)
-            if "티켓가격선택" in self._src() or "총" in self._src():
-                self._close_seat_panel()
-                return True
+            self.log(f"[{gname}] 같은 색 좌석 발견 → 좌석 클릭 (후보 {n}개)")
+            self._wait(1.0)
+            self._close_seat_panel()   # '잔여좌석 안내' 패널이 있으면 닫기
+            return True
         return False
 
     # 모든 프레임을 재귀로 훑어 좌석 클릭 시도. 클릭 성공 시 후보 수 반환,
@@ -914,80 +922,81 @@ class MacroThread(QThread):
             if cycle % 5 == 0:
                 self.log(f"구역 순회 {cycle}바퀴 완료...")
 
-    # ── 티켓가격선택 클릭 ────────────────────
+    # ── 좌석선택완료 / 티켓가격선택 버튼 클릭 ───
+    # 버튼은 보통 메인 예매 페이지(우측 패널)에 있으므로 default content 부터
+    # 모든 프레임을 재귀로 훑어 클릭한다.
     def _click_complete(self):
+        kws = ['좌석선택완료', '티켓가격선택', '가격선택', '선택완료']
+        self.log("좌석선택완료 버튼 찾는 중...")
         drv = self.driver
-        self.log("티켓가격선택 버튼 찾는 중...")
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        hit = self._click_complete_recursive(kws, 0)
+        if hit:
+            self.log(f"→ [{hit}] 클릭 완료")
+        else:
+            self.log("→ 좌석선택완료 버튼을 찾지 못했습니다")
+        self._wait(2.0)
 
-        # 1) XPath로 다양한 태그에서 탐색
-        keywords = ['티켓가격선택', '가격선택', '좌석선택완료', '선택완료']
-        tags = ['button', 'a', 'div', 'span', 'p']
-        clicked = False
-        for kw in keywords:
-            if clicked: break
-            for tag in tags:
-                xp = f"//{tag}[contains(text(),'{kw}')]"
-                try:
-                    els = drv.find_elements(By.XPATH, xp)
-                    for el in els:
-                        if el.is_displayed():
-                            drv.execute_script("arguments[0].click();", el)
-                            self.log(f"→ [{kw}] 클릭 완료")
-                            clicked = True; break
-                except: pass
-                if clicked: break
+    def _click_complete_recursive(self, kws, depth):
+        drv = self.driver
+        hit = self._click_complete_in_frame(kws)
+        if hit:
+            return hit
+        if depth >= 4:
+            return None
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
+            try:
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                hit = self._click_complete_recursive(kws, depth + 1)
+                if hit:
+                    return hit
+                drv.switch_to.parent_frame()
+            except Exception:
+                try: drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return None
 
-        # 2) JS 텍스트 검색 (위에서 못 찾은 경우)
-        if not clicked:
-            js = r"""
-            var kws = ['티켓가격선택','가격선택','좌석선택완료','선택완료'];
-            var nodes = document.querySelectorAll('button,a,div,span,li');
-            for(var k=0;k<kws.length;k++){
-                for(var i=0;i<nodes.length;i++){
-                    var t=(nodes[i].textContent||'').trim();
-                    if(t===kws[k] || t.indexOf(kws[k])>=0){
-                        var bnd=nodes[i].getBoundingClientRect();
-                        if(bnd.width>0 && bnd.height>0){
-                            nodes[i].click(); return kws[k];
+    def _click_complete_in_frame(self, kws):
+        js = r"""
+        var kws = arguments[0];
+        var nodes = document.querySelectorAll('button,a,div,span,li,input,img');
+        for(var k=0;k<kws.length;k++){
+            var kw=kws[k].replace(/\s+/g,'');
+            for(var i=0;i<nodes.length;i++){
+                var el=nodes[i];
+                var t=(el.textContent||'').replace(/\s+/g,'').trim();
+                var v=((el.value||'')+'').replace(/\s+/g,'').trim();
+                var a=((el.getAttribute&&(el.getAttribute('alt')||el.getAttribute('title')))||'').replace(/\s+/g,'').trim();
+                if(t.indexOf(kw)>=0 || v.indexOf(kw)>=0 || a.indexOf(kw)>=0){
+                    var b=el.getBoundingClientRect();
+                    if(b.width>0 && b.height>0){
+                        try{ el.click(); }catch(e){
+                            el.dispatchEvent(new MouseEvent('click',
+                                {bubbles:true,cancelable:true,view:window}));
                         }
+                        return kws[k];
                     }
                 }
             }
-            return null;
-            """
-            try:
-                result = drv.execute_script(js)
-                if result:
-                    self.log(f"→ JS로 [{result}] 클릭 완료")
-                    clicked = True
-            except: pass
-
-        if not clicked:
-            self.log("→ 티켓가격선택 버튼을 찾지 못했습니다")
-
-        self._wait(2.0)
+        }
+        return null;
+        """
+        try:
+            return self.driver.execute_script(js, kws)
+        except Exception:
+            return None
 
         # 3) 클릭 후 페이지가 넘어갔는지 확인, 아직 좌석화면이면 재시도
-        url = self._url()
-        if "step2" in url and "티켓가격선택" in self._src():
-            self.log("→ 아직 좌석 화면 - 1초 후 재시도")
-            self._wait(1.0)
-            try:
-                js2 = r"""
-                var nodes=document.querySelectorAll('button,a,div,span');
-                for(var i=0;i<nodes.length;i++){
-                    var t=(nodes[i].textContent||'').trim();
-                    if(t.indexOf('티켓가격선택')>=0||t.indexOf('가격선택')>=0){
-                        var b=nodes[i].getBoundingClientRect();
-                        if(b.width>0&&b.height>0){nodes[i].click();return true;}
-                    }
-                }
-                return false;
-                """
-                drv.execute_script(js2)
-            except: pass
-            self._wait(1.5)
-
     # ── 결제 페이지 감지 ──────────────────────
     # motickets: step3 이상 URL 또는 결제 전용 페이지로 이동했을 때만 감지
     def _is_payment_page(self):
