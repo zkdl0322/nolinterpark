@@ -934,15 +934,15 @@ class MacroThread(QThread):
             self.log("→ 로그인 완료")
 
             # 로그인 후 accounts.yanolja.com/myaccount 등으로 가있으면
-            # NOL 메인(nol.yanolja.com)으로 확실히 도달할 때까지 반복 이동
+            # 놀 인터파크 메인(nol.interpark.com)으로 확실히 도달할 때까지 반복 이동
             for _try in range(6):
                 cur = self._url()
-                # 이미 NOL 메인/티켓 도메인이면 종료
-                if "nol.yanolja.com" in cur or "nol.interpark.com" in cur:
+                # 이미 놀 인터파크 메인 도메인이면 종료
+                if "nol.interpark.com" in cur:
                     break
                 try:
-                    self.log("→ NOL 메인(nol.yanolja.com)으로 이동")
-                    self.driver.get("https://nol.yanolja.com/")
+                    self.log("→ 놀 인터파크 메인(nol.interpark.com)으로 이동")
+                    self.driver.get("https://nol.interpark.com/")
                     self._wait(2.5)
                 except:
                     self._wait(1)
