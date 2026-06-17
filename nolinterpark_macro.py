@@ -233,18 +233,50 @@ class MacroThread(QThread):
 
     # ── 좌석가격(등급) 패널 열기 ─────────────
     def _open_price_panel(self):
-        drv = self.driver
+        # '가격 전체보기' 패널을 연다(등급별 구역 링크가 나열됨). 모든 프레임 시도.
         for xp in [
+            "//*[contains(text(),'가격 전체보기')]",
+            "//*[contains(text(),'가격전체보기')]",
             "//*[contains(text(),'좌석가격보기')]",
             "//*[contains(text(),'가격보기')]",
         ]:
+            if self._open_price_panel_recursive(xp, 0):
+                return True
+        return False
+
+    def _open_price_panel_recursive(self, xp, depth):
+        drv = self.driver
+        try:
+            for el in drv.find_elements(By.XPATH, xp):
+                try:
+                    if el.is_displayed():
+                        drv.execute_script("arguments[0].click();", el)
+                        self._wait(0.6)
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if depth >= 3:
+            return False
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
             try:
-                el = drv.find_element(By.XPATH, xp)
-                if el.is_displayed():
-                    drv.execute_script("arguments[0].click();", el)
-                    self._wait(0.6)
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                if self._open_price_panel_recursive(xp, depth + 1):
                     return True
-            except: pass
+                drv.switch_to.parent_frame()
+            except Exception:
+                try: drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
         return False
 
     # ── 좌석가격(등급) 패널 닫기 ─────────────
@@ -629,118 +661,104 @@ class MacroThread(QThread):
                 seen.add(x); out.append(x)
         return out
 
-    # ── 구역의 좌석 등급 확인 ────────────────
-    # 우측 '좌석등급/잔여석' 패널엔 모든 등급명이 항상 있으므로, 등급명 검색은
-    # '좌석배치도(상세)' 프레임으로 한정해야 한다. (좌석배치도/입장번호/N열 포함)
-    def _zone_has_grade(self, gname):
-        g = (gname or "").replace(" ", "")
-        if not g:
-            return True
+    # ── 등급→구역 매핑 읽기 ('가격 전체보기' 패널) ──
+    # 패널은 [등급명 + 가격] 헤더 아래에 [101영역,102영역,...] 링크가 나열된다.
+    # 문서 순서로 훑으며 현재 등급을 추적해 등급별 구역 목록을 만든다.
+    # 반환: { 등급명(공백제거): [ {label, href}, ... ] }
+    def _get_grade_zone_map(self, grade_names):
+        gnames = [(g or '').replace(' ', '') for g in grade_names if g]
+        if not gnames:
+            return {}
         js = r"""
-        var g = arguments[0];
-        var bodyTxt = document.body ? document.body.innerText : '';
-        var isDetail = bodyTxt.indexOf('좌석배치도')>=0 ||
-                       bodyTxt.indexOf('입장번호')>=0 || /\d+\s*열/.test(bodyTxt);
-        if(!isDetail) return 0;               // 좌석 상세 프레임이 아니면 무시
-        var t = bodyTxt.replace(/\s+/g,'');
-        var nodes = document.querySelectorAll('[title],[alt]');
+        var gnames = arguments[0];
+        function norm(s){return (s||'').replace(/\s+/g,'');}
+        var map = {}; for(var i=0;i<gnames.length;i++) map[gnames[i]]=[];
+        var cur = null;
+        var nodes = document.querySelectorAll('a,dt,dd,th,td,li,span,div,p,strong,b,h3,h4');
         for(var i=0;i<nodes.length;i++){
-            t += ((nodes[i].getAttribute('title')||'')+(nodes[i].getAttribute('alt')||''));
+            var el=nodes[i];
+            var raw=(el.textContent||'');
+            var t=norm(raw);
+            if(t.length===0) continue;
+            if(t.length<=24){
+                for(var k=0;k<gnames.length;k++){
+                    if(gnames[k] && (t===gnames[k] ||
+                       (t.indexOf(gnames[k])>=0 && t.indexOf('원')>=0))){
+                        cur=gnames[k];
+                    }
+                }
+            }
+            var m=raw.match(/(\d{1,4})\s*영역/);
+            if(m){
+                var tag=(el.tagName||'').toLowerCase();
+                var href=el.getAttribute('href')||'';
+                var oc=el.getAttribute('onclick')||'';
+                if(tag==='a' || href || oc){
+                    if(cur){
+                        map[cur].push({label:m[1], href:href, onclick:oc});
+                    }
+                }
+            }
         }
-        t = t.replace(/\s+/g,'');
-        return t.indexOf(g)>=0 ? 1 : 0;
+        return map;
         """
         def run():
             try:
-                return [1] if self.driver.execute_script(js, g) else []
+                r = self.driver.execute_script(js, gnames)
+                return [r] if r else []
             except Exception:
                 return []
         drv = self.driver
         try: drv.switch_to.default_content()
         except Exception: pass
-        hits = self._collect_all_frames(run)
+        results = self._collect_all_frames(run)
         try: drv.switch_to.default_content()
         except Exception: pass
-        return len(hits) > 0
-
-    # ── 좌석 상세 프레임 내용 진단(1회) ───────
-    def _diagnose_zone_detail(self):
-        js = r"""
-        var bodyTxt = document.body ? document.body.innerText : '';
-        var isDetail = bodyTxt.indexOf('좌석배치도')>=0 ||
-                       bodyTxt.indexOf('입장번호')>=0 || /\d+\s*열/.test(bodyTxt);
-        if(!isDetail) return [];
-        var out=[bodyTxt.replace(/\s+/g,' ').slice(0,120)];
-        var nodes=document.querySelectorAll('[title],[alt]');
-        for(var i=0;i<nodes.length && out.length<5;i++){
-            var x=(nodes[i].getAttribute('title')||'')+'|'+(nodes[i].getAttribute('alt')||'');
-            if(x.length>1) out.push(x.slice(0,50));
-        }
-        return out;
-        """
-        def run():
-            try: return self.driver.execute_script(js) or []
-            except Exception: return []
-        drv = self.driver
-        try: drv.switch_to.default_content()
-        except Exception: pass
-        rows = self._collect_all_frames(run)
-        try: drv.switch_to.default_content()
-        except Exception: pass
-        if rows:
-            self.log("[진단] 좌석상세 내용 샘플:")
-            for r in rows[:5]:
-                self.log("  " + str(r)[:95])
-        else:
-            self.log("[진단] 좌석상세 프레임을 못 찾음")
-
-    # ── 구역별로 들어가 선택 등급과 일치하는 구역만 추림 ──
-    def _probe_zones_for_grade(self, zones, gname):
-        matched = []
-        self.log(f"구역별 좌석 등급 확인 중... (총 {len(zones)}개, 잠시 걸립니다)")
-        for i, z in enumerate(zones):
-            try:
-                if self._stop:
-                    break
-            except Exception:
-                pass
-            try:
-                if not self._click_zone(z):
-                    continue
-                self._wait(0.6)
-                if i == 0:
-                    self._diagnose_zone_detail()   # 첫 구역 상세 구조 1회 진단
-                if self._zone_has_grade(gname):
-                    matched.append(z)
-                    self.log(f"  ✓ {z.get('label','')} = {gname}")
-            except InterruptedError:
-                raise
-            except Exception:
+        merged = {}
+        for res in results:
+            if not isinstance(res, dict):
                 continue
-        self.log(f"→ '{gname}' 일치 구역 {len(matched)}개 확인")
-        return matched
+            for g, zs in res.items():
+                merged.setdefault(g, []).extend(zs or [])
+        return merged
 
-    # ── 구역 선택 (좌석 등급을 직접 읽어 매칭) ──
-    def _ask_zones(self, grade=None):
-        all_zones = self._get_zones()
+    # ── 구역 선택 (등급→구역 패널을 읽어 해당 등급 구역만 표시) ──
+    def _ask_zones(self, grade=None, grade_list=None):
         gname = (grade or {}).get('name', '')
+        all_zones = self._get_zones()
+        zone_list = all_zones
 
-        # 색이 아니라, 각 구역에 들어가 좌석 등급을 읽어 매칭되는 구역만 표시
-        if gname and all_zones:
-            matched = self._probe_zones_for_grade(all_zones, gname)
-            if matched:
-                zone_list = matched
+        if gname:
+            gkey = gname.replace(' ', '')
+            names = [g.get('name', '') for g in (grade_list or [])] or [gname]
+            # 먼저 그냥 읽고(이미 열려있을 수 있음), 비면 '가격 전체보기'를 열어 재시도
+            gmap = self._get_grade_zone_map(names)
+            zs = gmap.get(gkey, [])
+            if not zs:
+                self._open_price_panel(); self._wait(0.6)
+                gmap = self._get_grade_zone_map(names)
+                zs = gmap.get(gkey, [])
+                self._close_price_panel()
+            if zs:
+                zlist = []
+                for z in zs:
+                    href = z.get('href') or ''
+                    if not href and z.get('onclick'):
+                        href = 'javascript:' + z['onclick']
+                    zlist.append({'label': z.get('label', ''), 'href': href,
+                                  'color': None, 'src': 'panel'})
+                zone_list = self._dedup_zones(zlist)
+                self.log(f"[{gname}] 구역 {len(zone_list)}개 (가격표에서 매핑)")
             else:
-                self.log(f"'{gname}' 매칭 구역을 못 찾음 → 전체 구역 표시")
+                self.log(f"'{gname}' 구역 매핑을 못 읽음 → 전체 구역 표시")
                 zone_list = all_zones
-        else:
-            zone_list = all_zones
 
+        zone_list = self._sort_zones(zone_list)
         if not zone_list:
             self.log("구역 목록을 읽지 못했습니다. 직접 입력하세요 (예: 105,106)")
         else:
             for i, z in enumerate(zone_list, 1):
-                self.log(f"{i}. {z['label']}")
+                self.log(f"{i}. {z['label']}영역")
         self.log("구역 번호 입력(','로 여러개). 그냥 Enter 시 전체 구역을 순회합니다.")
         ans = self._ask(timeout=120)
         if not ans:
@@ -1036,6 +1054,26 @@ class MacroThread(QThread):
     # 현재 프레임 안에서만 구역 클릭 시도 (프레임 전환 없음)
     def _click_zone_in_frame(self, zone_num, href):
         drv = self.driver
+        # 0) 패널 링크(a[href]) 가 보관한 href 와 일치하면 그 요소를 마우스 클릭
+        if href:
+            try:
+                for el in drv.find_elements(By.CSS_SELECTOR, "a[href]"):
+                    if (el.get_attribute("href") or "") == href:
+                        drv.execute_script(
+                            "var e=arguments[0];"
+                            "['mouseover','mousedown','mouseup','click'].forEach("
+                            "function(t){e.dispatchEvent(new MouseEvent(t,"
+                            "{bubbles:true,cancelable:true,view:window}));});"
+                            "if(e.click)e.click();", el)
+                        return True
+            except Exception:
+                pass
+            if href.startswith("javascript:"):
+                try:
+                    drv.execute_script(href[len("javascript:"):])
+                    return True
+                except Exception:
+                    pass
         # 1) 보관해 둔 href 와 일치하는 area 실행 (가장 정확)
         if href:
             try:
@@ -1393,7 +1431,7 @@ class MacroThread(QThread):
             self._wait(0.3)
 
             # ⑤ 구역 선택 (zones = 구역 dict 리스트)
-            zones = self._ask_zones(grade)
+            zones = self._ask_zones(grade, grade_list)
             zone_labels = [z.get('label', '') for z in zones] if zones else []
             self.log(f"선택 구역: {', '.join(zone_labels) if zone_labels else '전체'} "
                      f"({len(zones)}개)")
