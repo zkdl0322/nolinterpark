@@ -933,10 +933,24 @@ class MacroThread(QThread):
         var picked=cands[Math.floor(Math.random()*cands.length)];
         function fire(el,t){el.dispatchEvent(new MouseEvent(t,
             {bubbles:true,cancelable:true,view:window}));}
+        function clickable(el){
+            for(var d=0; d<4 && el; d++){
+                var tag=(el.tagName||'').toLowerCase();
+                if(tag==='a'||tag==='td'||el.onclick||
+                   (el.getAttribute&&el.getAttribute('onclick'))) return el;
+                el=el.parentElement;
+            }
+            return null;
+        }
+        var tgt = clickable(picked) || picked;
         try{
             fire(picked,'mouseover'); fire(picked,'mousedown');
             fire(picked,'mouseup'); fire(picked,'click');
             if(picked.click) picked.click();
+            if(tgt!==picked){
+                fire(tgt,'mousedown'); fire(tgt,'mouseup'); fire(tgt,'click');
+                if(tgt.click) tgt.click();
+            }
         }catch(e){}
         return cands.length;
         """
