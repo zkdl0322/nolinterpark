@@ -529,16 +529,13 @@ class MacroThread(QThread):
         drv = self.driver
         zones = []
         # (1) area 태그 (BookMain.asp 좌석 이미지맵)
-        # 구역 번호/등급색은 이미지에 그려져 있어 DOM 엔 없다. 따라서 좌석배치도
-        # 이미지를 캡처해 각 구역(area) 위치의 픽셀 색을 샘플링해 등급색으로 쓴다.
-        # 클릭은 href(자바스크립트) 실행이 가장 확실하므로 href 도 함께 보관한다.
-        areas = []
+        # 구역 번호는 이미지에 그려져 DOM 텍스트엔 없는 경우가 많다. title/alt 가
+        # 있으면 그걸, 없으면 href 의 숫자를 라벨로 쓴다. 클릭은 href 실행이 확실.
+        # (등급 매칭은 색이 아니라 구역에 들어가 좌석 등급을 직접 읽어 판단)
         try:
             for a in drv.find_elements(By.TAG_NAME, "area"):
                 title  = (a.get_attribute("title") or a.get_attribute("alt") or "").strip()
                 href   = (a.get_attribute("href") or "").strip()
-                coords = (a.get_attribute("coords") or "").strip()
-                shape  = (a.get_attribute("shape") or "").strip()
                 label = title
                 if not label and href:
                     m = re.findall(r"\d{1,4}", href)
@@ -546,19 +543,10 @@ class MacroThread(QThread):
                         label = m[-1]
                 if not label:
                     continue
-                areas.append({'label': label, 'href': href,
-                              'coords': coords, 'shape': shape})
+                zones.append({'label': label, 'href': href,
+                              'color': None, 'src': 'area'})
         except Exception:
             pass
-        if areas:
-            try:
-                cols = self._sample_area_colors(areas)
-            except Exception:
-                cols = [None] * len(areas)
-            for idx, a in enumerate(areas):
-                zones.append({'label': a['label'], 'href': a['href'],
-                              'color': cols[idx] if idx < len(cols) else None,
-                              'src': 'area'})
         # (2) SVG/HTML 텍스트+도형 스캔
         js = r"""
         function toRGB(s){
@@ -641,23 +629,109 @@ class MacroThread(QThread):
                 seen.add(x); out.append(x)
         return out
 
-    # ── 구역 선택 (등급 색상으로 필터링) ──────
+    # ── 구역의 좌석 등급 확인 ────────────────
+    # 우측 '좌석등급/잔여석' 패널엔 모든 등급명이 항상 있으므로, 등급명 검색은
+    # '좌석배치도(상세)' 프레임으로 한정해야 한다. (좌석배치도/입장번호/N열 포함)
+    def _zone_has_grade(self, gname):
+        g = (gname or "").replace(" ", "")
+        if not g:
+            return True
+        js = r"""
+        var g = arguments[0];
+        var bodyTxt = document.body ? document.body.innerText : '';
+        var isDetail = bodyTxt.indexOf('좌석배치도')>=0 ||
+                       bodyTxt.indexOf('입장번호')>=0 || /\d+\s*열/.test(bodyTxt);
+        if(!isDetail) return 0;               // 좌석 상세 프레임이 아니면 무시
+        var t = bodyTxt.replace(/\s+/g,'');
+        var nodes = document.querySelectorAll('[title],[alt]');
+        for(var i=0;i<nodes.length;i++){
+            t += ((nodes[i].getAttribute('title')||'')+(nodes[i].getAttribute('alt')||''));
+        }
+        t = t.replace(/\s+/g,'');
+        return t.indexOf(g)>=0 ? 1 : 0;
+        """
+        def run():
+            try:
+                return [1] if self.driver.execute_script(js, g) else []
+            except Exception:
+                return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        hits = self._collect_all_frames(run)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        return len(hits) > 0
+
+    # ── 좌석 상세 프레임 내용 진단(1회) ───────
+    def _diagnose_zone_detail(self):
+        js = r"""
+        var bodyTxt = document.body ? document.body.innerText : '';
+        var isDetail = bodyTxt.indexOf('좌석배치도')>=0 ||
+                       bodyTxt.indexOf('입장번호')>=0 || /\d+\s*열/.test(bodyTxt);
+        if(!isDetail) return [];
+        var out=[bodyTxt.replace(/\s+/g,' ').slice(0,120)];
+        var nodes=document.querySelectorAll('[title],[alt]');
+        for(var i=0;i<nodes.length && out.length<5;i++){
+            var x=(nodes[i].getAttribute('title')||'')+'|'+(nodes[i].getAttribute('alt')||'');
+            if(x.length>1) out.push(x.slice(0,50));
+        }
+        return out;
+        """
+        def run():
+            try: return self.driver.execute_script(js) or []
+            except Exception: return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        rows = self._collect_all_frames(run)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        if rows:
+            self.log("[진단] 좌석상세 내용 샘플:")
+            for r in rows[:5]:
+                self.log("  " + str(r)[:95])
+        else:
+            self.log("[진단] 좌석상세 프레임을 못 찾음")
+
+    # ── 구역별로 들어가 선택 등급과 일치하는 구역만 추림 ──
+    def _probe_zones_for_grade(self, zones, gname):
+        matched = []
+        self.log(f"구역별 좌석 등급 확인 중... (총 {len(zones)}개, 잠시 걸립니다)")
+        for i, z in enumerate(zones):
+            try:
+                if self._stop:
+                    break
+            except Exception:
+                pass
+            try:
+                if not self._click_zone(z):
+                    continue
+                self._wait(0.6)
+                if i == 0:
+                    self._diagnose_zone_detail()   # 첫 구역 상세 구조 1회 진단
+                if self._zone_has_grade(gname):
+                    matched.append(z)
+                    self.log(f"  ✓ {z.get('label','')} = {gname}")
+            except InterruptedError:
+                raise
+            except Exception:
+                continue
+        self.log(f"→ '{gname}' 일치 구역 {len(matched)}개 확인")
+        return matched
+
+    # ── 구역 선택 (좌석 등급을 직접 읽어 매칭) ──
     def _ask_zones(self, grade=None):
         all_zones = self._get_zones()
-        grade_color = (grade or {}).get('color')
+        gname = (grade or {}).get('name', '')
 
-        # 등급 색상이 있고, 구역에도 색상 정보가 있으면 필터링
-        if grade_color and any(z.get('color') for z in all_zones):
-            def _color_match(zc):
-                if not zc: return False
-                d = abs(zc[0]-grade_color[0]) + abs(zc[1]-grade_color[1]) + abs(zc[2]-grade_color[2])
-                return d <= 70
-            filtered = [z for z in all_zones if _color_match(z.get('color'))]
-            if filtered:
-                self.log(f"[등급 필터] {grade['name']}(색 {grade_color}) 구역 {len(filtered)}개 표시")
-                zone_list = filtered
+        # 색이 아니라, 각 구역에 들어가 좌석 등급을 읽어 매칭되는 구역만 표시
+        if gname and all_zones:
+            matched = self._probe_zones_for_grade(all_zones, gname)
+            if matched:
+                zone_list = matched
             else:
-                self.log(f"색상 일치 구역 없음(등급색 {grade_color}) → 전체 표시")
+                self.log(f"'{gname}' 매칭 구역을 못 찾음 → 전체 구역 표시")
                 zone_list = all_zones
         else:
             zone_list = all_zones
@@ -760,10 +834,13 @@ class MacroThread(QThread):
         }
         if(cands.length===0) return 0;
         var picked=cands[0];
-        try { picked.click(); } catch(e){
-            picked.dispatchEvent(new MouseEvent('click',
-                {bubbles:true,cancelable:true,view:window}));
-        }
+        function fire(el,t){el.dispatchEvent(new MouseEvent(t,
+            {bubbles:true,cancelable:true,view:window}));}
+        try{
+            fire(picked,'mouseover'); fire(picked,'mousedown');
+            fire(picked,'mouseup'); fire(picked,'click');
+            if(picked.click) picked.click();
+        }catch(e){}
         return cands.length;
         """
         # 등급명(title/alt) 기반 탐지용 JS - 색이 안 잡히는 이미지 좌석 대응
@@ -794,7 +871,8 @@ class MacroThread(QThread):
         }
         if(cands.length===0) return 0;
         var p=cands[0];
-        try{p.click();}catch(e){p.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));}
+        function fire(el,t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));}
+        try{fire(p,'mouseover');fire(p,'mousedown');fire(p,'mouseup');fire(p,'click');if(p.click)p.click();}catch(e){}
         return cands.length;
         """
 
@@ -1150,7 +1228,20 @@ class MacroThread(QThread):
     def _click_complete_in_frame(self, kws):
         js = r"""
         var kws = arguments[0];
-        var nodes = document.querySelectorAll('button,a,div,span,li,input,img');
+        function fire(el,t){el.dispatchEvent(new MouseEvent(t,
+            {bubbles:true,cancelable:true,view:window}));}
+        function clickable(el){
+            // 클릭 가능한 조상(a/button/onclick) 찾기
+            for(var d=0; d<5 && el; d++){
+                var tag=(el.tagName||'').toLowerCase();
+                if(tag==='a'||tag==='button'||el.onclick||
+                   (el.getAttribute&&el.getAttribute('onclick'))||
+                   el.getAttribute('role')==='button') return el;
+                el=el.parentElement;
+            }
+            return null;
+        }
+        var nodes = document.querySelectorAll('button,a,div,span,li,input,img,td');
         for(var k=0;k<kws.length;k++){
             var kw=kws[k].replace(/\s+/g,'');
             for(var i=0;i<nodes.length;i++){
@@ -1161,7 +1252,12 @@ class MacroThread(QThread):
                 if(t.indexOf(kw)>=0 || v.indexOf(kw)>=0 || a.indexOf(kw)>=0){
                     var b=el.getBoundingClientRect();
                     if(b.width>0 && b.height>0){
-                        try{ el.click(); }catch(e){
+                        var tgt=clickable(el)||el;
+                        try{
+                            fire(tgt,'mouseover'); fire(tgt,'mousedown');
+                            fire(tgt,'mouseup'); fire(tgt,'click');
+                            if(tgt.click) tgt.click();
+                        }catch(e){
                             el.dispatchEvent(new MouseEvent('click',
                                 {bubbles:true,cancelable:true,view:window}));
                         }
