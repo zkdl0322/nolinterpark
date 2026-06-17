@@ -1080,12 +1080,13 @@ class MacroThread(QThread):
             try:
                 t = (self.driver.execute_script(
                     "return document.body?document.body.innerText:''") or "").replace(' ', '')
-                m = re.search(r'총(\d+)석', t)
-                if m:
-                    return [int(m.group(1))]
+                # '총 N석 선택' 카운터를 우선 매칭, 없으면 모든 '총 N석'
+                nums = [int(x) for x in re.findall(r'총(\d+)석선택', t)]
+                if not nums:
+                    nums = [int(x) for x in re.findall(r'총(\d+)석', t)]
+                return nums
             except Exception:
-                pass
-            return []
+                return []
         drv = self.driver
         try: drv.switch_to.default_content()
         except Exception: pass
@@ -1093,7 +1094,7 @@ class MacroThread(QThread):
         try: drv.switch_to.default_content()
         except Exception: pass
         if vals:
-            return max(vals) > 0
+            return max(vals) > 0   # 어느 프레임이든 총 N석>0 이면 선택된 것
         return None
 
     # 현재 프레임이 좌석배치도(상세) 프레임인지 (메인 패널의 범례 오클릭 방지)
