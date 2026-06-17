@@ -987,17 +987,51 @@ class MacroThread(QThread):
         return cands.length;
         """
 
-        # 1) 색 기반 탐지
+        # 0) 좌석 title 의 등급명으로 매칭 (가장 정확) + onclick(SelectSeat) 직접 실행
+        # 좌석: <span class="SeatN" title="[지정석 R석] ..." onclick="SelectSeat(this,...)">
+        title_js = r"""
+        var gname=(arguments[0]||'').replace(/\s+/g,'');
+        var nodes=document.querySelectorAll("[onclick*='SelectSeat']");
+        var cands=[];
+        for(var i=0;i<nodes.length;i++){
+            var el=nodes[i];
+            var title=(el.getAttribute('title')||'').replace(/\s+/g,'');
+            if(gname && title.indexOf(gname)<0) continue;   // 선택 등급 좌석만
+            var b=el.getBoundingClientRect?el.getBoundingClientRect():null;
+            if(!b||b.width<2||b.height<2) continue;
+            cands.push(el);
+        }
+        if(cands.length===0) return 0;
+        var p=cands[Math.floor(Math.random()*cands.length)];   // 같은 등급 중 랜덤
+        try{ if(typeof p.onclick==='function'){ p.onclick(); } }catch(e){}
+        try{ p.click(); }catch(e){}
+        try{
+            ['mouseover','mousedown','mouseup','click'].forEach(function(t){
+                p.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});
+        }catch(e){}
+        return cands.length;
+        """
+
+        # 1) title(등급명) 기반 탐지 (우선)
         try:
             drv.switch_to.default_content()
         except Exception:
             pass
         try:
-            n = self._click_seat_recursive(js, target, 0)
-        except Exception as e:
-            self.log(f"좌석 클릭 오류: {str(e)[:80]}")
+            n = self._click_seat_recursive(title_js, gname, 0)
+        except Exception:
             n = 0
-        # 2) 색으로 못 찾으면 등급명 속성 기반 탐지
+        self._accept_alert()
+        # 2) 못 찾으면 색 기반 탐지
+        if not n:
+            try: drv.switch_to.default_content()
+            except Exception: pass
+            try:
+                n = self._click_seat_recursive(js, target, 0)
+            except Exception:
+                n = 0
+            self._accept_alert()
+        # 3) 그래도 못 찾으면 등급명 속성(title/alt) 기반
         if not n:
             try: drv.switch_to.default_content()
             except Exception: pass
@@ -1005,11 +1039,12 @@ class MacroThread(QThread):
                 n = self._click_seat_recursive(attr_js, gname, 0)
             except Exception:
                 n = 0
+            self._accept_alert()
         if n and n > 0:
             disp = gname or "모두"
             self.log(f"[{disp}] 빈 좌석 클릭 시도 (후보 {n}개)")
             self._wait(1.2)
-            self._close_seat_panel()   # '잔여좌석 안내' 패널이 있으면 닫기
+            self._accept_alert()
             # 실제로 선택됐는지(총 N석>0) 검증 — 거짓 성공 방지
             sel = self._seat_selected()
             if sel is True:
@@ -1018,6 +1053,20 @@ class MacroThread(QThread):
             self.log("→ 아직 선택 안 됨(총 0석), 계속 탐색")
             return False
         return False
+
+    # 알림창(alert/confirm)이 뜨면 수락. (좌석 클릭 후 안내창 처리)
+    def _accept_alert(self):
+        try:
+            alert = self.driver.switch_to.alert
+            txt = ""
+            try: txt = alert.text
+            except Exception: pass
+            alert.accept()
+            if txt:
+                self.log(f"[알림] {txt[:50]}")
+            return True
+        except Exception:
+            return False
 
     # 선택좌석 패널의 '총 N석' 값으로 실제 선택 여부 확인.
     # True=선택됨, False=0석(미선택), None=확인불가
