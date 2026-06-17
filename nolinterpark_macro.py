@@ -854,6 +854,11 @@ class MacroThread(QThread):
         drv = self.driver
         target = (grade or {}).get("color")  # [r,g,b] 또는 None
 
+        # 이미 좌석이 선택돼 있으면(총 N석>0) 추가 클릭 없이 성공 처리
+        if self._seat_selected() is True:
+            self.log("→ 좌석 이미 선택됨")
+            return True
+
         js = r"""
         var target = arguments[0];   // [r,g,b] 또는 null
         function parseColor(s){
@@ -1043,13 +1048,13 @@ class MacroThread(QThread):
         if n and n > 0:
             disp = gname or "모두"
             self.log(f"[{disp}] 빈 좌석 클릭 시도 (후보 {n}개)")
-            self._wait(1.2)
-            self._accept_alert()
-            # 실제로 선택됐는지(총 N석>0) 검증 — 거짓 성공 방지
-            sel = self._seat_selected()
-            if sel is True:
-                self.log("→ 좌석 선택됨")
-                return True
+            # 선택 반영이 늦을 수 있어 최대 ~4초간 '총 N석'을 폴링
+            for _ in range(8):
+                self._accept_alert()
+                if self._seat_selected() is True:
+                    self.log("→ 좌석 선택됨")
+                    return True
+                self._wait(0.5)
             self.log("→ 아직 선택 안 됨(총 0석), 계속 탐색")
             return False
         return False
@@ -1342,6 +1347,11 @@ class MacroThread(QThread):
                     _ = self.driver.current_url
                 except Exception:
                     self.log("브라우저가 종료되어 순회를 중단합니다."); return
+
+                # 안전망: 이미 좌석이 선택돼 있으면 순회 종료(→ 좌석선택완료 단계로)
+                if self._seat_selected() is True:
+                    self.log("→ 좌석 선택 확인, 순회 종료")
+                    return
 
                 try:
                     # 구역 클릭 (실패해도 다음 구역으로). zone 은 dict 또는 문자열.
