@@ -1438,11 +1438,16 @@ class MacroThread(QThread):
         try: drv.switch_to.default_content()
         except Exception: pass
         hit = self._click_complete_recursive(kws, 0)
+        try: self.driver.switch_to.default_content()
+        except Exception: pass
+        self._accept_alert()      # 좌석선택완료 후 확인창 처리
+        self._wait(1.5)
+        self._accept_alert()
         if hit:
-            self.log(f"→ [{hit}] 클릭 완료")
+            self.log(f"→ [{hit}] 클릭")
         else:
             self.log("→ 좌석선택완료 버튼을 찾지 못했습니다")
-        self._wait(2.0)
+        self._wait(1.0)
 
     def _click_complete_recursive(self, kws, depth):
         drv = self.driver
@@ -1475,42 +1480,48 @@ class MacroThread(QThread):
     def _click_complete_in_frame(self, kws):
         js = r"""
         var kws = arguments[0];
-        function fire(el,t){el.dispatchEvent(new MouseEvent(t,
-            {bubbles:true,cancelable:true,view:window}));}
         function clickable(el){
-            // 클릭 가능한 조상(a/button/onclick) 찾기
             for(var d=0; d<5 && el; d++){
                 var tag=(el.tagName||'').toLowerCase();
                 if(tag==='a'||tag==='button'||el.onclick||
                    (el.getAttribute&&el.getAttribute('onclick'))||
-                   el.getAttribute('role')==='button') return el;
+                   (el.getAttribute&&el.getAttribute('role')==='button')) return el;
                 el=el.parentElement;
             }
             return null;
         }
+        function doClick(tgt){
+            // href=javascript: → 실행, onclick → 호출, 아니면 click()
+            var href=(tgt.getAttribute&&tgt.getAttribute('href'))||'';
+            if(href && href.indexOf('javascript:')===0){
+                try{ eval(href.substring(11)); return true; }catch(e){}
+            }
+            try{ if(typeof tgt.onclick==='function'){ tgt.onclick.call(tgt); return true; } }catch(e){}
+            try{ tgt.click(); return true; }catch(e){}
+            try{ tgt.dispatchEvent(new MouseEvent('click',
+                {bubbles:true,cancelable:true,view:window})); return true; }catch(e){}
+            return false;
+        }
+        // 가장 구체적인(텍스트가 짧은) 매칭 요소를 고른다
         var nodes = document.querySelectorAll('button,a,div,span,li,input,img,td');
         for(var k=0;k<kws.length;k++){
             var kw=kws[k].replace(/\s+/g,'');
+            var best=null, bestLen=1e9;
             for(var i=0;i<nodes.length;i++){
                 var el=nodes[i];
-                var t=(el.textContent||'').replace(/\s+/g,'').trim();
-                var v=((el.value||'')+'').replace(/\s+/g,'').trim();
-                var a=((el.getAttribute&&(el.getAttribute('alt')||el.getAttribute('title')))||'').replace(/\s+/g,'').trim();
-                if(t.indexOf(kw)>=0 || v.indexOf(kw)>=0 || a.indexOf(kw)>=0){
-                    var b=el.getBoundingClientRect();
-                    if(b.width>0 && b.height>0){
-                        var tgt=clickable(el)||el;
-                        try{
-                            fire(tgt,'mouseover'); fire(tgt,'mousedown');
-                            fire(tgt,'mouseup'); fire(tgt,'click');
-                            if(tgt.click) tgt.click();
-                        }catch(e){
-                            el.dispatchEvent(new MouseEvent('click',
-                                {bubbles:true,cancelable:true,view:window}));
-                        }
-                        return kws[k];
-                    }
-                }
+                var t=(el.textContent||'').replace(/\s+/g,'');
+                var v=((el.value||'')+'').replace(/\s+/g,'');
+                var a=((el.getAttribute&&(el.getAttribute('alt')||el.getAttribute('title')))||'').replace(/\s+/g,'');
+                var hit=(t.indexOf(kw)>=0)||(v.indexOf(kw)>=0)||(a.indexOf(kw)>=0);
+                if(!hit) continue;
+                var b=el.getBoundingClientRect();
+                if(b.width<=0||b.height<=0) continue;
+                var L=(t||v||a).length;
+                if(L<bestLen){ bestLen=L; best=el; }
+            }
+            if(best){
+                var tgt=clickable(best)||best;
+                if(doClick(tgt)) return kws[k];
             }
         }
         return null;
@@ -1520,26 +1531,30 @@ class MacroThread(QThread):
         except Exception:
             return None
 
-        # 3) 클릭 후 페이지가 넘어갔는지 확인, 아직 좌석화면이면 재시도
-    # ── 결제 페이지 감지 ──────────────────────
-    # motickets: step3 이상 URL 또는 결제 전용 페이지로 이동했을 때만 감지
+    # ── 다음 단계(가격/할인·배송/주문자·결제) 진입 감지 ──
+    # poticket 은 단계가 iframe 으로 바뀌므로 URL이 아닌 '내용'으로 판단한다.
+    # 아직 좌석배치도(좌석선택)면 False, 다음 단계 키워드가 보이면 True.
     def _is_payment_page(self):
-        try:
-            url = self.driver.current_url
-            # motickets 결제 단계: step3, payment, checkout, order 등
-            pay_url_kw = ["step3", "payment", "checkout", "order", "BookEnd",
-                          "poticket", "pay/"]
-            if any(k in url for k in pay_url_kw):
-                return True
-            # step2는 절대 결제 페이지 아님
-            if "step2" in url:
-                return False
-            # step2 아닌 다른 URL로 이동했고 결제 키워드가 소스에 있을 때
-            src = self.driver.page_source
-            pay_src_kw = ["주문금액", "결제수단", "최종결제금액", "결제하기"]
-            return any(k in src for k in pay_src_kw)
-        except:
+        def fn():
+            try:
+                t = self.driver.execute_script(
+                    "return document.body?document.body.innerText:''") or ""
+                return [re.sub(r'\s+', '', t)]
+            except Exception:
+                return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        texts = self._collect_all_frames(fn)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        joined = " ".join(texts)
+        # 아직 좌석 선택 화면이면 다음 단계 아님
+        if "좌석배치도" in joined or "좌석을선택" in joined:
             return False
+        next_kw = ["할인선택", "가격선택", "주문자확인", "배송선택", "배송지",
+                   "결제수단", "최종결제", "결제하기", "예매자정보", "무통장"]
+        return any(k in joined for k in next_kw)
 
     # ── 결제 대기 ─────────────────────────────
     def _wait_payment(self):
