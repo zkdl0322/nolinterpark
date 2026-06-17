@@ -1080,9 +1080,9 @@ class MacroThread(QThread):
     def _seat_selected(self):
         def fn():
             try:
-                t = (self.driver.execute_script(
-                    "return document.body?document.body.innerText:''") or "").replace(' ', '')
-                # '총 N석 선택' 카운터를 우선 매칭, 없으면 모든 '총 N석'
+                t = self.driver.execute_script(
+                    "return document.body?document.body.innerText:''") or ""
+                t = re.sub(r'\s+', '', t)   # 공백/줄바꿈/탭 모두 제거
                 nums = [int(x) for x in re.findall(r'총(\d+)석선택', t)]
                 if not nums:
                     nums = [int(x) for x in re.findall(r'총(\d+)석', t)]
