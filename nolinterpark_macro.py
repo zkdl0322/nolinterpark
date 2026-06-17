@@ -932,22 +932,61 @@ class MacroThread(QThread):
                 n = 0
         if n and n > 0:
             disp = gname or "모두"
-            self.log(f"[{disp}] 빈 좌석 발견 → 좌석 클릭 (후보 {n}개)")
-            self._wait(1.0)
+            self.log(f"[{disp}] 빈 좌석 클릭 시도 (후보 {n}개)")
+            self._wait(1.2)
             self._close_seat_panel()   # '잔여좌석 안내' 패널이 있으면 닫기
+            # 실제로 선택됐는지(총 N석) 검증 — 거짓 성공 방지
+            sel = self._seat_selected()
+            if sel is False:
+                self.log("→ 아직 선택 안 됨(총 0석), 계속 탐색")
+                return False
+            self.log("→ 좌석 선택됨")
             return True
         return False
 
-    # 모든 프레임을 재귀로 훑어 좌석 클릭 시도. 클릭 성공 시 후보 수 반환,
-    # 성공한 프레임에 머무른다(이후 _src() 확인을 위해).
+    # 선택좌석 패널의 '총 N석' 값으로 실제 선택 여부 확인.
+    # True=선택됨, False=0석(미선택), None=확인불가
+    def _seat_selected(self):
+        def fn():
+            try:
+                t = (self.driver.execute_script(
+                    "return document.body?document.body.innerText:''") or "").replace(' ', '')
+                m = re.search(r'총(\d+)석', t)
+                if m:
+                    return [int(m.group(1))]
+            except Exception:
+                pass
+            return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        vals = self._collect_all_frames(fn)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        if vals:
+            return max(vals) > 0
+        return None
+
+    # 현재 프레임이 좌석배치도(상세) 프레임인지 (메인 패널의 범례 오클릭 방지)
+    def _is_seat_detail_frame(self):
+        try:
+            t = self.driver.execute_script(
+                "return document.body?document.body.innerText:''") or ""
+        except Exception:
+            return False
+        return ('좌석배치도' in t) or ('입장번호' in t) or bool(re.search(r'\d+\s*열', t))
+
+    # 좌석배치도 프레임에서만 좌석 클릭 시도. (메인의 등급 범례 보라네모 오클릭 방지)
     def _click_seat_recursive(self, js, target, depth):
         drv = self.driver
-        try:
-            n = drv.execute_script(js, target)
-        except Exception:
-            n = 0
-        if n and n > 0:
-            return n
+        # 좌석상세 프레임일 때만 좌석 탐지/클릭 실행
+        if self._is_seat_detail_frame():
+            try:
+                n = drv.execute_script(js, target)
+            except Exception:
+                n = 0
+            if n and n > 0:
+                return n
         if depth >= 4:
             return 0
         try:
