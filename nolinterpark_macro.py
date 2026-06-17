@@ -661,28 +661,6 @@ class MacroThread(QThread):
                 seen.add(x); out.append(x)
         return out
 
-    # ── 등급 헤더 클릭(펼치기) JS ────────────
-    _JS_EXPAND_GRADE = r"""
-    var g = (arguments[0]||'').replace(/\s+/g,'');
-    function norm(s){return (s||'').replace(/\s+/g,'');}
-    var nodes = document.querySelectorAll('a,dt,dd,th,td,li,span,div,p,strong,b,h3,h4');
-    for(var i=0;i<nodes.length;i++){
-        var el=nodes[i];
-        var t=norm(el.textContent);
-        if(t.length===0 || t.length>24) continue;
-        if(t===g || (t.indexOf(g)>=0 && t.indexOf('원')>=0)){
-            try{
-                ['mouseover','mousedown','mouseup','click'].forEach(function(tp){
-                    el.dispatchEvent(new MouseEvent(tp,
-                        {bubbles:true,cancelable:true,view:window}));});
-                if(el.click) el.click();
-            }catch(e){}
-            return true;
-        }
-    }
-    return false;
-    """
-
     # ── 펼쳐진 패널에서 'N영역' 링크 읽기 JS ───
     _JS_READ_ZONES = r"""
     var out=[];
@@ -701,29 +679,60 @@ class MacroThread(QThread):
     return out;
     """
 
-    # ── 선택 등급의 구역 읽기 ('가격 전체보기' 패널) ──
-    # 패널에서 구역은 해당 등급을 '펼쳤을 때만' 나타나므로, 등급 헤더를 먼저
-    # 클릭해 펼친 뒤 나타나는 'N영역' 링크들을 읽는다. (모든 프레임 재귀)
+    # ── 요소 안전 클릭 (네이티브 우선, JS 폴백) ──
+    def _safe_click(self, el):
+        drv = self.driver
+        try:
+            drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        except Exception:
+            pass
+        try:
+            el.click()
+            return True
+        except Exception:
+            try:
+                drv.execute_script("arguments[0].click();", el)
+                return True
+            except Exception:
+                return False
+
+    # ── 선택 등급의 구역 읽기 (좌석등급 패널) ──
+    # 좌석등급 패널에서 선택 등급명을 가진 요소를 '네이티브 클릭'해 펼친 뒤,
+    # 그때 나타나는 'N영역' 링크들을 읽는다. (모든 프레임 재귀)
     def _get_zones_for_grade(self, gname, depth=0):
         drv = self.driver
-        # 현재 프레임에서 등급 헤더 펼치기 시도
-        expanded = False
+        g = (gname or "").replace(" ", "")
+        # 1) 현재 프레임: 등급명을 가진 짧은 텍스트 요소들을 후보로 모아 클릭 시도
+        cands = []
         try:
-            expanded = bool(drv.execute_script(self._JS_EXPAND_GRADE, gname))
-        except Exception:
-            expanded = False
-        if expanded:
-            self._wait(0.7)
-            for _ in range(3):
+            xp = "//*[contains(normalize-space(.), '%s')]" % gname
+            for el in drv.find_elements(By.XPATH, xp):
                 try:
-                    zs = drv.execute_script(self._JS_READ_ZONES) or []
+                    t = (el.text or "").replace(" ", "")
+                    if t and len(t) <= 40 and g in t:
+                        cands.append((len(t), el))
                 except Exception:
-                    zs = []
-                if zs:
-                    return zs
-                self._wait(0.4)
+                    continue
+        except Exception:
+            pass
+        cands.sort(key=lambda x: x[0])   # 짧은 텍스트(등급명 자체) 우선
+        for _, el in cands[:6]:
+            try:
+                self._safe_click(el)
+                self._wait(0.7)
+                for _r in range(2):
+                    try:
+                        zs = drv.execute_script(self._JS_READ_ZONES) or []
+                    except Exception:
+                        zs = []
+                    if zs:
+                        return zs
+                    self._wait(0.4)
+            except Exception:
+                continue
         if depth >= 4:
             return []
+        # 2) 하위 프레임 재귀
         try:
             cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
         except Exception:
@@ -818,7 +827,8 @@ class MacroThread(QThread):
             self.log("구역 목록을 읽지 못했습니다. 직접 입력하세요 (예: 105,106)")
         else:
             for i, z in enumerate(zone_list, 1):
-                self.log(f"{i}. {z['label']}영역")
+                lbl = z.get('label', '')
+                self.log(f"{i}. {lbl if '영역' in lbl else lbl + '영역'}")
         self.log("구역 번호 입력(','로 여러개). 그냥 Enter 시 전체 구역을 순회합니다.")
         ans = self._ask(timeout=120)
         if not ans:
