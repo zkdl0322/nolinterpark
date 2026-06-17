@@ -661,66 +661,89 @@ class MacroThread(QThread):
                 seen.add(x); out.append(x)
         return out
 
-    # ── 등급→구역 매핑 읽기 ('가격 전체보기' 패널) ──
-    # 패널은 [등급명 + 가격] 헤더 아래에 [101영역,102영역,...] 링크가 나열된다.
-    # 문서 순서로 훑으며 현재 등급을 추적해 등급별 구역 목록을 만든다.
-    # 반환: { 등급명(공백제거): [ {label, href}, ... ] }
-    def _get_grade_zone_map(self, grade_names):
-        gnames = [(g or '').replace(' ', '') for g in grade_names if g]
-        if not gnames:
-            return {}
-        js = r"""
-        var gnames = arguments[0];
-        function norm(s){return (s||'').replace(/\s+/g,'');}
-        var map = {}; for(var i=0;i<gnames.length;i++) map[gnames[i]]=[];
-        var cur = null;
-        var nodes = document.querySelectorAll('a,dt,dd,th,td,li,span,div,p,strong,b,h3,h4');
-        for(var i=0;i<nodes.length;i++){
-            var el=nodes[i];
-            var raw=(el.textContent||'');
-            var t=norm(raw);
-            if(t.length===0) continue;
-            if(t.length<=24){
-                for(var k=0;k<gnames.length;k++){
-                    if(gnames[k] && (t===gnames[k] ||
-                       (t.indexOf(gnames[k])>=0 && t.indexOf('원')>=0))){
-                        cur=gnames[k];
-                    }
-                }
-            }
-            var m=raw.match(/(\d{1,4})\s*영역/);
-            if(m){
-                var tag=(el.tagName||'').toLowerCase();
-                var href=el.getAttribute('href')||'';
-                var oc=el.getAttribute('onclick')||'';
-                if(tag==='a' || href || oc){
-                    if(cur){
-                        map[cur].push({label:m[1], href:href, onclick:oc});
-                    }
-                }
+    # ── 등급 헤더 클릭(펼치기) JS ────────────
+    _JS_EXPAND_GRADE = r"""
+    var g = (arguments[0]||'').replace(/\s+/g,'');
+    function norm(s){return (s||'').replace(/\s+/g,'');}
+    var nodes = document.querySelectorAll('a,dt,dd,th,td,li,span,div,p,strong,b,h3,h4');
+    for(var i=0;i<nodes.length;i++){
+        var el=nodes[i];
+        var t=norm(el.textContent);
+        if(t.length===0 || t.length>24) continue;
+        if(t===g || (t.indexOf(g)>=0 && t.indexOf('원')>=0)){
+            try{
+                ['mouseover','mousedown','mouseup','click'].forEach(function(tp){
+                    el.dispatchEvent(new MouseEvent(tp,
+                        {bubbles:true,cancelable:true,view:window}));});
+                if(el.click) el.click();
+            }catch(e){}
+            return true;
+        }
+    }
+    return false;
+    """
+
+    # ── 펼쳐진 패널에서 'N영역' 링크 읽기 JS ───
+    _JS_READ_ZONES = r"""
+    var out=[];
+    var nodes=document.querySelectorAll('a');
+    for(var i=0;i<nodes.length;i++){
+        var el=nodes[i];
+        var m=(el.textContent||'').match(/(\d{1,4})\s*영역/);
+        if(m){
+            var b=el.getBoundingClientRect();
+            if(b.width>0 && b.height>0){
+                out.push({label:m[1], href:el.getAttribute('href')||'',
+                          onclick:el.getAttribute('onclick')||''});
             }
         }
-        return map;
-        """
-        def run():
-            try:
-                r = self.driver.execute_script(js, gnames)
-                return [r] if r else []
-            except Exception:
-                return []
+    }
+    return out;
+    """
+
+    # ── 선택 등급의 구역 읽기 ('가격 전체보기' 패널) ──
+    # 패널에서 구역은 해당 등급을 '펼쳤을 때만' 나타나므로, 등급 헤더를 먼저
+    # 클릭해 펼친 뒤 나타나는 'N영역' 링크들을 읽는다. (모든 프레임 재귀)
+    def _get_zones_for_grade(self, gname, depth=0):
         drv = self.driver
-        try: drv.switch_to.default_content()
-        except Exception: pass
-        results = self._collect_all_frames(run)
-        try: drv.switch_to.default_content()
-        except Exception: pass
-        merged = {}
-        for res in results:
-            if not isinstance(res, dict):
-                continue
-            for g, zs in res.items():
-                merged.setdefault(g, []).extend(zs or [])
-        return merged
+        # 현재 프레임에서 등급 헤더 펼치기 시도
+        expanded = False
+        try:
+            expanded = bool(drv.execute_script(self._JS_EXPAND_GRADE, gname))
+        except Exception:
+            expanded = False
+        if expanded:
+            self._wait(0.7)
+            for _ in range(3):
+                try:
+                    zs = drv.execute_script(self._JS_READ_ZONES) or []
+                except Exception:
+                    zs = []
+                if zs:
+                    return zs
+                self._wait(0.4)
+        if depth >= 4:
+            return []
+        try:
+            cnt = len(drv.find_elements(By.TAG_NAME, "iframe"))
+        except Exception:
+            cnt = 0
+        for i in range(cnt):
+            try:
+                frames = drv.find_elements(By.TAG_NAME, "iframe")
+                if i >= len(frames):
+                    break
+                drv.switch_to.frame(frames[i])
+                zs = self._get_zones_for_grade(gname, depth + 1)
+                if zs:
+                    return zs
+                drv.switch_to.parent_frame()
+            except Exception:
+                try: drv.switch_to.parent_frame()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        return []
 
     # ── 구역 선택 (등급→구역 패널을 읽어 해당 등급 구역만 표시) ──
     def _ask_zones(self, grade=None, grade_list=None):
@@ -729,16 +752,11 @@ class MacroThread(QThread):
         zone_list = all_zones
 
         if gname:
-            gkey = gname.replace(' ', '')
-            names = [g.get('name', '') for g in (grade_list or [])] or [gname]
-            # 먼저 그냥 읽고(이미 열려있을 수 있음), 비면 '가격 전체보기'를 열어 재시도
-            gmap = self._get_grade_zone_map(names)
-            zs = gmap.get(gkey, [])
-            if not zs:
-                self._open_price_panel(); self._wait(0.6)
-                gmap = self._get_grade_zone_map(names)
-                zs = gmap.get(gkey, [])
-                self._close_price_panel()
+            # '가격 전체보기' 패널을 열고, 선택 등급 헤더를 펼쳐 구역을 읽는다
+            self._open_price_panel(); self._wait(0.5)
+            zs = self._get_zones_for_grade(gname)
+            try: self.driver.switch_to.default_content()
+            except Exception: pass
             if zs:
                 zlist = []
                 for z in zs:
