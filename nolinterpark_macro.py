@@ -899,12 +899,20 @@ class MacroThread(QThread):
                   Math.abs(rgb.b-target[2]);
             return d<=70;
         }
-        function isSoldByClass(el){
+        function clsStr(el){
             var c=(el.className&&el.className.baseVal!==undefined)
                   ?el.className.baseVal:(el.className||'');
-            c=(''+c).toLowerCase();
+            return (''+c).toLowerCase();
+        }
+        function isSoldByClass(el){
+            var c=clsStr(el);
             return c.indexOf('sold')>=0||c.indexOf('disable')>=0||
                    c.indexOf('reserved')>=0||c.indexOf('unavailab')>=0;
+        }
+        function isLegend(el){
+            // 범례 스와치(cls=lv 등) 제외 — 좌석 아님
+            var c=clsStr(el);
+            return c==='lv'||c.indexOf('legend')>=0||c.indexOf('grade')>=0;
         }
         var seats = document.querySelectorAll(
             'rect[fill], circle[fill], path[fill], rect[class], circle[class],' +
@@ -914,14 +922,15 @@ class MacroThread(QThread):
         for(var i=0;i<seats.length;i++){
             var el=seats[i];
             if(el.getAttribute && el.getAttribute('aria-disabled')==='true') continue;
-            if(isSoldByClass(el)) continue;
+            if(isSoldByClass(el) || isLegend(el)) continue;
             var bnd=el.getBoundingClientRect?el.getBoundingClientRect():null;
             if(!bnd||bnd.width<3||bnd.height<3) continue;
             if(!matchColor(getRGB(el))) continue;
             cands.push(el);
         }
         if(cands.length===0) return 0;
-        var picked=cands[0];
+        // 같은 색 좌석 중 무작위 선택
+        var picked=cands[Math.floor(Math.random()*cands.length)];
         function fire(el,t){el.dispatchEvent(new MouseEvent(t,
             {bubbles:true,cancelable:true,view:window}));}
         try{
@@ -987,13 +996,13 @@ class MacroThread(QThread):
             self.log(f"[{disp}] 빈 좌석 클릭 시도 (후보 {n}개)")
             self._wait(1.2)
             self._close_seat_panel()   # '잔여좌석 안내' 패널이 있으면 닫기
-            # 실제로 선택됐는지(총 N석) 검증 — 거짓 성공 방지
+            # 실제로 선택됐는지(총 N석>0) 검증 — 거짓 성공 방지
             sel = self._seat_selected()
-            if sel is False:
-                self.log("→ 아직 선택 안 됨(총 0석), 계속 탐색")
-                return False
-            self.log("→ 좌석 선택됨")
-            return True
+            if sel is True:
+                self.log("→ 좌석 선택됨")
+                return True
+            self.log("→ 아직 선택 안 됨(총 0석), 계속 탐색")
+            return False
         return False
 
     # 선택좌석 패널의 '총 N석' 값으로 실제 선택 여부 확인.
@@ -1065,16 +1074,19 @@ class MacroThread(QThread):
     # ── 퍼즐 슬라이더 ─────────────────────────
     def _solve_puzzle(self):
         drv = self.driver
+        # 실제로 '크기가 있는' 퍼즐 컨테이너가 보일 때만 진행 (오탐/에러 스팸 방지)
         found = False
-        for sel in [".slider_wrap",".puzzle_wrap","[class*='slider']","[class*='puzzle']"]:
+        for sel in [".slider_wrap", ".puzzle_wrap",
+                    "[class*='slider']", "[class*='puzzle']"]:
             try:
-                if drv.find_element(By.CSS_SELECTOR, sel).is_displayed():
+                el = drv.find_element(By.CSS_SELECTOR, sel)
+                sz = el.size
+                if el.is_displayed() and sz.get('width', 0) > 5 and sz.get('height', 0) > 5:
                     found = True; break
-            except: pass
+            except Exception:
+                pass
         if not found:
-            try: found = "슬라이더를 밀어" in drv.page_source
-            except: pass
-        if not found: return
+            return
 
         offset, bg_path, pc_path = 140, "puzzle_bg.png", "puzzle_pc.png"
         bg_el = pc_el = None
@@ -1100,15 +1112,21 @@ class MacroThread(QThread):
         slider = None
         for s in [".btn_slide_right",".slide_btn",".slider_btn",
                   "div[class*='slider'] span","#nc_1__scale_text"]:
-            try: slider = drv.find_element(By.CSS_SELECTOR, s); break
-            except: pass
+            try:
+                el = drv.find_element(By.CSS_SELECTOR, s)
+                sz = el.size
+                if el.is_displayed() and sz.get('width', 0) > 0 and sz.get('height', 0) > 0:
+                    slider = el; break
+            except Exception:
+                pass
         if slider:
             try:
                 ac = ActionChains(drv)
                 ac.click_and_hold(slider).pause(0.3)
                 for _ in range(20): ac.move_by_offset(offset/20, 0).pause(0.02)
                 ac.release().perform(); self._wait(1.2)
-            except Exception as e: self.log(f"슬라이더 오류: {e}")
+            except Exception:
+                pass   # 슬라이더 드래그 실패는 조용히 무시 (없는 경우가 대부분)
 
     # ── 구역 클릭 ─────────────────────────────
     # zone: {'label','href',...} 또는 라벨 문자열.
@@ -1294,21 +1312,27 @@ class MacroThread(QThread):
     # ── 좌석 DOM 진단 (구조 파악용, 1회) ───────
     # 좌석을 못 잡을 때 실제 좌석 요소 샘플을 로그로 출력한다.
     def _diagnose_seats(self):
+        # 좌석상세 프레임에서 '좌석처럼 보이는' 요소의 outerHTML 을 덤프해 구조 확인.
+        # 좌석은 보통 onclick 이 있거나 background-image(스프라이트)로 색을 입힌다.
         js = r"""
         var out=[];
-        var nodes=document.querySelectorAll('img,td,span,div,rect,circle,a');
-        for(var i=0;i<nodes.length && out.length<10;i++){
+        var body=document.body?document.body.innerText:'';
+        var isDetail = body.indexOf('좌석배치도')>=0 || body.indexOf('입장번호')>=0;
+        if(!isDetail) return [];
+        var nodes=document.querySelectorAll('img,td,span,div,a,area');
+        for(var i=0;i<nodes.length && out.length<8;i++){
             var el=nodes[i];
-            var b=el.getBoundingClientRect?el.getBoundingClientRect():{width:0,height:0};
-            if(b.width<2||b.height<2||b.width>50||b.height>50) continue;
+            var oc=el.getAttribute('onclick')||'';
             var cs=getComputedStyle(el);
-            var cls=el.className; if(cls&&cls.baseVal!==undefined) cls=cls.baseVal;
-            out.push((el.tagName||'')
-                +' cls='+(((cls||'')+'').slice(0,18))
-                +' title='+(((el.getAttribute('title')||''))+'').slice(0,16)
-                +' val='+((el.getAttribute('value')||''))
-                +' bg='+((cs.backgroundColor||'').replace(/\s/g,''))
-                +' src='+(((el.getAttribute('src')||'')).split('/').pop()||'').slice(0,18));
+            var bgimg=cs.backgroundImage||'';
+            var hasBg=(bgimg && bgimg!=='none');
+            // 좌석 후보: onclick 있거나 배경이미지로 칠해진 작은 요소
+            if(!oc && !hasBg) continue;
+            var b=el.getBoundingClientRect?el.getBoundingClientRect():{width:0,height:0};
+            if(b.width<2||b.width>60||b.height<2||b.height>60) continue;
+            var html=(el.outerHTML||'').replace(/\s+/g,' ').slice(0,160);
+            var bgi=bgimg.replace(/.*\//,'').slice(0,30);
+            out.push(html+'  |bgimg='+bgi);
         }
         return out;
         """
@@ -1322,11 +1346,11 @@ class MacroThread(QThread):
         try: drv.switch_to.default_content()
         except Exception: pass
         if rows:
-            self.log("[진단] 좌석 후보 요소 샘플(구조 확인용):")
-            for r in rows[:8]:
-                self.log("  " + str(r)[:95])
+            self.log("[진단] 좌석 요소 outerHTML 샘플:")
+            for r in rows[:6]:
+                self.log("  " + str(r)[:170])
         else:
-            self.log("[진단] 좌석 후보 요소를 찾지 못했습니다")
+            self.log("[진단] 좌석 후보(onclick/배경이미지) 요소를 못 찾음")
 
     # ── 좌석선택완료 / 티켓가격선택 버튼 클릭 ───
     # 버튼은 보통 메인 예매 페이지(우측 패널)에 있으므로 default content 부터
