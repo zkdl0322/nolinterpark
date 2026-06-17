@@ -745,18 +745,60 @@ class MacroThread(QThread):
                     except Exception: pass
         return []
 
-    # ── 구역 선택 (등급→구역 패널을 읽어 해당 등급 구역만 표시) ──
+    # ── 등급 패널 구조 진단 (구역 못 읽을 때) ──
+    def _diagnose_grade_panel(self, gname):
+        g = (gname or "").replace(" ", "")
+        js = r"""
+        var g=arguments[0];
+        function norm(s){return (s||'').replace(/\s+/g,'');}
+        var gradeHits=[], areaCnt=0;
+        var nodes=document.querySelectorAll('a,li,dd,dt,span,div,td,p,strong,b');
+        for(var i=0;i<nodes.length;i++){
+            var raw=(nodes[i].textContent||'');
+            if(/(\d{1,4})\s*영역/.test(raw)) areaCnt++;
+            var t=norm(raw);
+            if(t.length>0 && t.length<=24 && g && t.indexOf(g)>=0 && gradeHits.length<4){
+                gradeHits.push(nodes[i].tagName+':'+t.slice(0,24));
+            }
+        }
+        return {grade:gradeHits, area:areaCnt};
+        """
+        def run():
+            try:
+                r = self.driver.execute_script(js, g)
+                return [r] if r and (r.get('grade') or r.get('area')) else []
+            except Exception:
+                return []
+        drv = self.driver
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        rows = self._collect_all_frames(run)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        if rows:
+            self.log("[진단] 등급/구역 패널:")
+            for r in rows[:4]:
+                self.log(f"  등급매칭 {r.get('grade')}, 영역링크수={r.get('area')}")
+        else:
+            self.log(f"[진단] '{gname}' 패널 요소를 못 찾음")
+
+    # ── 구역 선택 (등급 클릭 후 펼쳐진 구역만 표시; 색 미사용) ──
     def _ask_zones(self, grade=None, grade_list=None):
         gname = (grade or {}).get('name', '')
         all_zones = self._get_zones()
         zone_list = all_zones
 
         if gname:
-            # '가격 전체보기' 패널을 열고, 선택 등급 헤더를 펼쳐 구역을 읽는다
-            self._open_price_panel(); self._wait(0.5)
+            # 1) 좌석등급 패널에서 선택 등급을 클릭해 펼친 뒤 구역을 읽는다
             zs = self._get_zones_for_grade(gname)
+            # 2) 비면 '가격 전체보기'를 열고 재시도
+            if not zs:
+                self._open_price_panel(); self._wait(0.6)
+                zs = self._get_zones_for_grade(gname)
             try: self.driver.switch_to.default_content()
             except Exception: pass
+            if not zs:
+                self._diagnose_grade_panel(gname)   # 구조 진단
             if zs:
                 zlist = []
                 for z in zs:
