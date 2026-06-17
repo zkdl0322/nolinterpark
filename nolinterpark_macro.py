@@ -936,26 +936,23 @@ class MacroThread(QThread):
         if(cands.length===0) return 0;
         // 같은 색 좌석 중 무작위 선택
         var picked=cands[Math.floor(Math.random()*cands.length)];
-        function fire(el,t){el.dispatchEvent(new MouseEvent(t,
-            {bubbles:true,cancelable:true,view:window}));}
         function clickable(el){
             for(var d=0; d<4 && el; d++){
-                var tag=(el.tagName||'').toLowerCase();
-                if(tag==='a'||tag==='td'||el.onclick||
+                if((el.tagName||'').toLowerCase()==='a'||
+                   (el.tagName||'').toLowerCase()==='td'||el.onclick||
                    (el.getAttribute&&el.getAttribute('onclick'))) return el;
                 el=el.parentElement;
             }
             return null;
         }
-        var tgt = clickable(picked) || picked;
+        // onclick 가진 요소 우선, 토글이므로 '딱 한 번만' 실행
+        var tgt = (typeof picked.onclick==='function') ? picked
+                  : (clickable(picked) || picked);
         try{
-            fire(picked,'mouseover'); fire(picked,'mousedown');
-            fire(picked,'mouseup'); fire(picked,'click');
-            if(picked.click) picked.click();
-            if(tgt!==picked){
-                fire(tgt,'mousedown'); fire(tgt,'mouseup'); fire(tgt,'click');
-                if(tgt.click) tgt.click();
-            }
+            if(typeof tgt.onclick==='function'){ tgt.onclick.call(tgt); }
+            else if(tgt.click){ tgt.click(); }
+            else { tgt.dispatchEvent(new MouseEvent('click',
+                {bubbles:true,cancelable:true,view:window})); }
         }catch(e){}
         return cands.length;
         """
@@ -986,9 +983,13 @@ class MacroThread(QThread):
             cands.push(el);
         }
         if(cands.length===0) return 0;
-        var p=cands[0];
-        function fire(el,t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));}
-        try{fire(p,'mouseover');fire(p,'mousedown');fire(p,'mouseup');fire(p,'click');if(p.click)p.click();}catch(e){}
+        var p=cands[Math.floor(Math.random()*cands.length)];
+        try{
+            if(typeof p.onclick==='function'){ p.onclick.call(p); }
+            else if(p.click){ p.click(); }
+            else { p.dispatchEvent(new MouseEvent('click',
+                {bubbles:true,cancelable:true,view:window})); }
+        }catch(e){}
         return cands.length;
         """
 
@@ -1008,11 +1009,12 @@ class MacroThread(QThread):
         }
         if(cands.length===0) return 0;
         var p=cands[Math.floor(Math.random()*cands.length)];   // 같은 등급 중 랜덤
-        try{ if(typeof p.onclick==='function'){ p.onclick(); } }catch(e){}
-        try{ p.click(); }catch(e){}
+        // 좌석 선택은 토글이므로 '딱 한 번만' 실행 (여러번이면 도로 해제됨)
         try{
-            ['mouseover','mousedown','mouseup','click'].forEach(function(t){
-                p.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));});
+            if(typeof p.onclick==='function'){ p.onclick.call(p); }
+            else if(p.click){ p.click(); }
+            else { p.dispatchEvent(new MouseEvent('click',
+                {bubbles:true,cancelable:true,view:window})); }
         }catch(e){}
         return cands.length;
         """
