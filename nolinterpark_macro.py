@@ -1142,62 +1142,38 @@ class MacroThread(QThread):
                     except Exception: pass
         return 0
 
-    # ── 퍼즐 슬라이더 ─────────────────────────
-    def _solve_puzzle(self):
+    # ── 슬라이더 퍼즐(안심예매) 처리 ──────────
+    # 슬라이더 퍼즐은 봇 차단용 보안장치라 자동 풀이가 불안정/부적절하다.
+    # 감지되면 사용자가 직접 슬라이더를 밀어 맞추도록 안내하고, 통과될 때까지
+    # 대기했다가 자동으로 이어서 진행한다. (텍스트 보안문자와 동일한 방식)
+    def _puzzle_present(self):
+        def fn():
+            try:
+                t = self.driver.execute_script(
+                    "return document.body?document.body.innerText:''") or ""
+                t = re.sub(r'\s+', '', t)
+                return [1] if ('슬라이더를밀어' in t or '퍼즐을맞춰' in t) else []
+            except Exception:
+                return []
         drv = self.driver
-        # 실제로 '크기가 있는' 퍼즐 컨테이너가 보일 때만 진행 (오탐/에러 스팸 방지)
-        found = False
-        for sel in [".slider_wrap", ".puzzle_wrap",
-                    "[class*='slider']", "[class*='puzzle']"]:
-            try:
-                el = drv.find_element(By.CSS_SELECTOR, sel)
-                sz = el.size
-                if el.is_displayed() and sz.get('width', 0) > 5 and sz.get('height', 0) > 5:
-                    found = True; break
-            except Exception:
-                pass
-        if not found:
-            return
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        hits = self._collect_all_frames(fn)
+        try: drv.switch_to.default_content()
+        except Exception: pass
+        return len(hits) > 0
 
-        offset, bg_path, pc_path = 140, "puzzle_bg.png", "puzzle_pc.png"
-        bg_el = pc_el = None
-        for s in ["#captcha_bg","#puzzle_bg","img[id*='bg']",".puzzle_bg"]:
-            try: bg_el = drv.find_element(By.CSS_SELECTOR, s); break
-            except: pass
-        for s in ["#captcha_piece","#puzzle_piece","img[id*='piece']",".puzzle_piece"]:
-            try: pc_el = drv.find_element(By.CSS_SELECTOR, s); break
-            except: pass
-        if bg_el and pc_el:
-            try:
-                bg_el.screenshot(bg_path); pc_el.screenshot(pc_path)
-                bg = np.array(Image.open(bg_path).convert("L"), dtype=np.float32)
-                pc = np.array(Image.open(pc_path).convert("L"), dtype=np.float32)
-                ph, pw = pc.shape; bh, bw = bg.shape
-                best_x, best_sc = 0, float("inf")
-                for x in range(0, bw - pw, 2):
-                    sc = float(np.mean(np.abs(bg[:ph, x:x+pw] - pc)))
-                    if sc < best_sc: best_sc = sc; best_x = x
-                offset = best_x
-            except: pass
-        self.log(f"[퍼즐 감지] 목표 위치: {offset}px")
-        slider = None
-        for s in [".btn_slide_right",".slide_btn",".slider_btn",
-                  "div[class*='slider'] span","#nc_1__scale_text"]:
-            try:
-                el = drv.find_element(By.CSS_SELECTOR, s)
-                sz = el.size
-                if el.is_displayed() and sz.get('width', 0) > 0 and sz.get('height', 0) > 0:
-                    slider = el; break
-            except Exception:
-                pass
-        if slider:
-            try:
-                ac = ActionChains(drv)
-                ac.click_and_hold(slider).pause(0.3)
-                for _ in range(20): ac.move_by_offset(offset/20, 0).pause(0.02)
-                ac.release().perform(); self._wait(1.2)
-            except Exception:
-                pass   # 슬라이더 드래그 실패는 조용히 무시 (없는 경우가 대부분)
+    def _solve_puzzle(self):
+        if not self._puzzle_present():
+            return
+        self.log("슬라이더 퍼즐 인증이 떴습니다.")
+        self.log("→ 예매창에서 직접 슬라이더를 밀어 퍼즐을 맞춰주세요.")
+        self.log("  통과되면 자동으로 계속 진행합니다...")
+        for _ in range(300):   # 최대 5분 대기
+            self._wait(1)
+            if not self._puzzle_present():
+                self.log("→ 퍼즐 통과 확인")
+                return
 
     # ── 구역 클릭 ─────────────────────────────
     # zone: {'label','href',...} 또는 라벨 문자열.
