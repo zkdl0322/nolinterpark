@@ -1345,11 +1345,12 @@ class MacroThread(QThread):
         while True:
             for zone in zones:
                 self._wait(0)
-                # 브라우저 세션 생존 확인
+                # 브라우저 세션 생존 확인 (닫히면 매크로 전체 중단)
                 try:
                     _ = self.driver.current_url
                 except Exception:
-                    self.log("브라우저가 종료되어 순회를 중단합니다."); return
+                    self.log("브라우저(예매창)가 종료되어 매크로를 중단합니다.")
+                    raise InterruptedError
 
                 # 안전망: 이미 좌석이 선택돼 있으면 순회 종료(→ 좌석선택완료 단계로)
                 if self._seat_selected() is True:
