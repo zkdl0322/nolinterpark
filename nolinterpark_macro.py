@@ -1367,10 +1367,6 @@ class MacroThread(QThread):
                     # 예매 가능 좌석 클릭 → 성공하면 순회 종료
                     if self._click_seat(grade):
                         return
-                    # 첫 구역 진입 후에도 못 잡으면 좌석 DOM 구조를 1회 진단 출력
-                    if not self._diag_done:
-                        self._diag_done = True
-                        self._diagnose_seats()
                     consecutive_err = 0
 
                 except InterruptedError:
