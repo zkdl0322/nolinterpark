@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import io
+import os
 import re
 import sys
 import time
@@ -1857,6 +1858,16 @@ class LoginWindow(QWidget):
             opts.add_argument("--disable-blink-features=AutomationControlled")
             opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             opts.add_experimental_option("useAutomationExtension", False)
+            # 로그인 세션 유지(자동 로그인): 고정 프로필 폴더 재사용
+            # 한 번 로그인하면 쿠키가 이 폴더에 저장돼 다음 실행부터 로그인 유지됨
+            profile_dir = os.path.join(
+                os.path.expanduser("~"), ".nolinterpark_profile")
+            try:
+                os.makedirs(profile_dir, exist_ok=True)
+            except Exception:
+                pass
+            opts.add_argument(f"--user-data-dir={profile_dir}")
+            opts.add_argument("--profile-directory=Default")
             drv = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()), options=opts
             )
@@ -1866,7 +1877,10 @@ class LoginWindow(QWidget):
                 {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"}
             )
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"Chrome 실행 실패:\n{e}"); return
+            QMessageBox.critical(
+                self, "오류",
+                f"Chrome 실행 실패:\n{e}\n\n"
+                f"(Chrome 창이 이미 열려 있으면 모두 닫고 다시 시도하세요)"); return
 
         try: drv.get(LOGIN_URL)
         except: pass
